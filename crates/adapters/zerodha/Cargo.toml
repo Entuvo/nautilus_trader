@@ -56,6 +56,43 @@ nautilus-model = { workspace = true }
 nautilus-network = { workspace = true }
 nautilus-system = { workspace = true, optional = true }
 
+ahash = { workspace = true }
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+bon = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+futures-util = { workspace = true }
+hex = "0.4"
+indexmap = { workspace = true }
+log = { workspace = true }
+reqwest = { workspace = true, features = ["form"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+strum = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tokio-util = { workspace = true }
+url = { workspace = true }
+ustr = { workspace = true }
+zeroize = { workspace = true }
+
 pyo3 = { workspace = true, optional = true }
 pyo3-async-runtimes = { workspace = true, optional = true }
 pyo3-stub-gen = { workspace = true, optional = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+env_logger = "0.11"
+rstest = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[[example]]
+name = "zerodha-smoke-connect"
+path = "examples/smoke_connect.rs"
+required-features = ["live"]
+doc = false
