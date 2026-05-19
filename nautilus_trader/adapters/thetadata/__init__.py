@@ -23,17 +23,27 @@ This adapter is data-only — there is no execution client.
 
 """
 
+from nautilus_trader.adapters.thetadata.config import ThetaDataDataClientConfig
 from nautilus_trader.adapters.thetadata.constants import THETADATA
 from nautilus_trader.adapters.thetadata.constants import THETADATA_CLIENT_ID
 from nautilus_trader.adapters.thetadata.constants import THETADATA_VENUE
-from nautilus_trader.adapters.thetadata.factories import ThetaDataDataClientConfig
-from nautilus_trader.adapters.thetadata.factories import ThetaDataDataClientFactory
+from nautilus_trader.adapters.thetadata.data import ThetaDataDataClient
+from nautilus_trader.adapters.thetadata.factories import ThetaDataLiveDataClientFactory
+from nautilus_trader.adapters.thetadata.factories import get_cached_thetadata_http_client
+from nautilus_trader.adapters.thetadata.factories import get_cached_thetadata_instrument_provider
+from nautilus_trader.adapters.thetadata.factories import get_cached_thetadata_ws_client
+from nautilus_trader.adapters.thetadata.providers import ThetaDataInstrumentProvider
 
 
 __all__ = [
     "THETADATA",
     "THETADATA_CLIENT_ID",
     "THETADATA_VENUE",
+    "ThetaDataDataClient",
     "ThetaDataDataClientConfig",
-    "ThetaDataDataClientFactory",
+    "ThetaDataInstrumentProvider",
+    "ThetaDataLiveDataClientFactory",
+    "get_cached_thetadata_http_client",
+    "get_cached_thetadata_instrument_provider",
+    "get_cached_thetadata_ws_client",
 ]
