@@ -74,6 +74,27 @@ impl ThetaDataHttpClient {
         format!("ThetaDataHttpClient(base_url={:?})", self.inner.base_url())
     }
 
+    /// Builds a Nautilus [`OptionContract`] from an OCC-encoded `InstrumentId` without an HTTP
+    /// round trip.
+    ///
+    /// Strike, expiration, right, and underlying are recovered from the symbol; the static
+    /// option defaults (multiplier 100, tick 0.01 USD, lot 1, expiration approximated at
+    /// 21:00 UTC on the contract date) are applied. Useful for instrument-provider single
+    /// loads where bulk listing would be wasteful.
+    #[staticmethod]
+    #[pyo3(name = "option_contract_from_id")]
+    #[pyo3(signature = (instrument_id, venue=None))]
+    fn py_option_contract_from_id(
+        instrument_id: InstrumentId,
+        venue: Option<Venue>,
+    ) -> PyResult<OptionContract> {
+        let theta = ThetaOptionContract::from_symbol(instrument_id.symbol.as_str())
+            .map_err(to_pyvalue_err)?;
+        let resolved_venue = venue.unwrap_or(*THETADATA_VENUE);
+        crate::instruments::build_from_canonical(&theta, resolved_venue, now_unix_nanos())
+            .map_err(to_pyvalue_err)
+    }
+
     /// Lists every available expiration date for the given underlying symbol.
     ///
     /// Returns a list of `YYYY-MM-DD` strings.
