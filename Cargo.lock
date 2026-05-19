@@ -6460,6 +6460,7 @@ dependencies = [
  "nautilus-testkit",
  "nautilus-thetadata",
  "nautilus-trading",
+ "nautilus-zerodha",
  "pyo3",
  "pyo3-stub-gen",
 ]
@@ -6720,6 +6721,21 @@ dependencies = [
  "serde_json",
  "strum 0.28.0",
  "ustr",
+]
+
+[[package]]
+name = "nautilus-zerodha"
+version = "0.57.0"
+dependencies = [
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-live",
+ "nautilus-model",
+ "nautilus-network",
+ "nautilus-system",
+ "pyo3",
+ "pyo3-async-runtimes",
+ "pyo3-stub-gen",
 ]
 
 [[package]]
