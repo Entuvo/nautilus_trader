@@ -26,6 +26,9 @@ pub mod factories;
 pub mod historical;
 
 #[cfg(feature = "live")]
+pub mod live;
+
+#[cfg(feature = "live")]
 use nautilus_common::factories::{ClientConfig, DataClientFactory};
 use nautilus_core::python::{to_pyruntime_err, to_pyvalue_err};
 use nautilus_system::get_global_pyo3_registry;
@@ -39,6 +42,8 @@ use crate::{
 };
 
 use crate::python::historical::ThetaDataHttpClient;
+#[cfg(feature = "live")]
+use crate::python::live::ThetaDataWsClient;
 
 #[cfg(feature = "live")]
 #[expect(clippy::needless_pass_by_value)]
@@ -78,6 +83,7 @@ pub fn thetadata(_: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     #[cfg(feature = "live")]
     {
+        m.add_class::<ThetaDataWsClient>()?;
         m.add_class::<ThetaDataDataClientConfig>()?;
         m.add_class::<ThetaDataDataClientFactory>()?;
 
