@@ -19,6 +19,7 @@ members = [
   "crates/adapters/okx",
   "crates/adapters/sandbox",
   "crates/adapters/tardis",
+  "crates/adapters/thetadata",
   "crates/analysis",
   "crates/backtest",
   "crates/cli",
@@ -109,6 +110,7 @@ nautilus-okx = { path = "crates/adapters/okx", version = "0.57.0", default-featu
 nautilus-polymarket = { path = "crates/adapters/polymarket", version = "0.57.0", default-features = false }
 nautilus-sandbox = { path = "crates/adapters/sandbox", version = "0.57.0", default-features = false }
 nautilus-tardis = { path = "crates/adapters/tardis", version = "0.57.0", default-features = false }
+nautilus-thetadata = { path = "crates/adapters/thetadata", version = "0.57.0", default-features = false }
 
 # -----------------------------------------------------------------------------
 # Core dependencies

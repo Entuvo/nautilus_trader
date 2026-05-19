@@ -6458,6 +6458,7 @@ dependencies = [
  "nautilus-serialization",
  "nautilus-tardis",
  "nautilus-testkit",
+ "nautilus-thetadata",
  "nautilus-trading",
  "pyo3",
  "pyo3-stub-gen",
@@ -6648,6 +6649,45 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "nautilus-thetadata"
+version = "0.57.0"
+dependencies = [
+ "ahash 0.8.12",
+ "anyhow",
+ "async-trait",
+ "bon",
+ "chrono",
+ "chrono-tz",
+ "flate2",
+ "futures-util",
+ "indexmap 2.14.0",
+ "log",
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-live",
+ "nautilus-model",
+ "nautilus-network",
+ "nautilus-persistence",
+ "nautilus-system",
+ "proptest",
+ "pyo3",
+ "pyo3-async-runtimes",
+ "pyo3-stub-gen",
+ "reqwest 0.13.3",
+ "rstest",
+ "serde",
+ "serde_json",
+ "strum 0.28.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "ustr",
+ "zeroize",
 ]
 
 [[package]]
