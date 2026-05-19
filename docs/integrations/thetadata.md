@@ -11,15 +11,7 @@ The adapter supports:
 - Requesting historical quotes, trades, and OHLC bars via REST.
 - Bulk-backfilling a Nautilus `ParquetDataCatalog` from REST.
 - Instrument enumeration via the option chain (`list_expirations` + `list_strikes`).
-
-:::warning Python TradingNode integration is incomplete
-The current release wires the adapter for the **Rust `LiveNode`** path only. The Python
-`TradingNode.add_data_client_factory(...)` path is not yet supported — the factory
-re-exports the pyo3 class which does not satisfy the `issubclass(factory, LiveDataClientFactory)`
-check in `node_builder.py`. Planned closure is documented in
-[`crates/adapters/thetadata/PYTHON_INTEGRATION_PLAN.md`](https://github.com/nautechsystems/nautilus_trader/blob/develop/crates/adapters/thetadata/PYTHON_INTEGRATION_PLAN.md)
-(estimated 6–10 hours of focused work to mirror the bitmex pattern).
-:::
+- Both **Rust `LiveNode`** and **Python `TradingNode`** entry points.
 
 ## Architecture
 
@@ -39,14 +31,21 @@ connection management.
 
 The following adapter classes are available:
 
-- `ThetaDataDataClient` — `DataClient` implementation; orchestrates HTTP + WS.
-- `ThetaDataDataClientConfig` — bon-built config DTO; carries URLs, tier, timeouts.
-- `ThetaDataDataClientFactory` — wires the client into `LiveNode`.
-- `ThetaDataHistoricalClient` — REST client (`hist_quotes`, `hist_trades`, `hist_ohlc`,
-  `list_expirations`, `list_strikes`, `list_contracts`, `hist_stock_eod`,
-  `hist_index_eod`, `calendar/*`).
-- `ThetaDataWsClient` — WebSocket client (subscribe/unsubscribe with reconnect-replay).
-- `ThetaDataInstrumentProvider` — builds Nautilus `OptionContract` instruments.
+### Python (TradingNode)
+
+- `ThetaDataDataClient` — `LiveMarketDataClient` orchestrator; routes engine commands.
+- `ThetaDataDataClientConfig` — msgspec-backed config; serializable via `ImportableConfig`.
+- `ThetaDataLiveDataClientFactory` — `LiveDataClientFactory` subclass for `TradingNode`.
+- `ThetaDataInstrumentProvider` — builds Nautilus `OptionContract` instruments from OCC IDs.
+
+### Rust (LiveNode) and pyo3 primitives
+
+- `ThetaDataDataClient` (Rust) — `DataClient` implementation for `LiveNode`.
+- `ThetaDataDataClientFactory` (Rust + pyo3 re-export) — wires into `LiveNode::builder`.
+- `nautilus_pyo3.ThetaDataHttpClient` — REST primitive (`hist_quotes`, `hist_trades`,
+  `hist_ohlc`, `list_expirations`, `list_strikes`, `list_contracts`, `hist_stock_eod`,
+  `hist_index_eod`, `option_contract_from_id`).
+- `nautilus_pyo3.ThetaDataWsClient` — WebSocket primitive with reconnect-replay.
 
 ## Prerequisites
 
@@ -99,21 +98,56 @@ The adapter's `ThetaDataTier` enum drives stream-count enforcement client-side
 ```python
 from nautilus_trader.adapters.thetadata import (
     ThetaDataDataClientConfig,
-    ThetaDataDataClientFactory,
+    ThetaDataLiveDataClientFactory,
 )
 
 config = ThetaDataDataClientConfig(
     http_url="http://127.0.0.1:25503/v3",          # ThetaTerminal HTTP
     ws_url="ws://127.0.0.1:25520/v1/events",       # ThetaTerminal WebSocket
     tier="standard",                                # "value" | "standard" | "pro"
-    http_timeout_secs=30.0,
+    http_timeout_secs=30,
     max_reconnects=10,
 )
-
-factory = ThetaDataDataClientFactory()
 ```
 
-Pass `factory` + `config` to `LiveNode.add_data_client(name, factory, config)`.
+## Python TradingNode example
+
+```python
+from nautilus_trader.adapters.thetadata import (
+    ThetaDataDataClientConfig,
+    ThetaDataLiveDataClientFactory,
+)
+from nautilus_trader.live.config import TradingNodeConfig
+from nautilus_trader.live.node import TradingNode
+from nautilus_trader.model.identifiers import InstrumentId
+
+config = TradingNodeConfig(
+    trader_id="TESTER-001",
+    data_clients={
+        "THETADATA": ThetaDataDataClientConfig(
+            tier="standard",
+            instrument_ids=[
+                InstrumentId.from_str("SPXW260520C07400000.THETADATA"),
+            ],
+        ),
+    },
+)
+node = TradingNode(config=config)
+node.add_data_client_factory("THETADATA", ThetaDataLiveDataClientFactory)
+node.build()
+node.run()
+```
+
+This routes engine subscribe/request commands through the Python
+`ThetaDataDataClient`, which delegates the actual REST/WS work to the pyo3
+primitives (`nautilus_pyo3.ThetaDataHttpClient` and
+`nautilus_pyo3.ThetaDataWsClient`). The same configuration is YAML/JSON
+serializable through `ImportableConfig`.
+
+## Rust LiveNode example
+
+`LiveNode::builder().add_data_client(...)` continues to work with the Rust
+`ThetaDataDataClient`. See `crates/adapters/thetadata/examples/node_data_tester.rs`.
 
 ## Examples
 

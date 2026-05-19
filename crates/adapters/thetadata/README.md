@@ -74,16 +74,22 @@ THETADATA_DAYS_BACK=30 THETADATA_CATALOG_DIR=./data/thetadata-catalog \
   cargo run --release --example thetadata-backfill-trades -p nautilus-thetadata
 ```
 
-## Known gap: Python TradingNode integration
+## Entry points (all live-verified or test-covered)
 
-The Rust `LiveNode` path is complete and live-verified. The Python `TradingNode` path is
-**not yet wired** — `factories.py` currently re-exports the pyo3 class which does not pass
-the `issubclass(factory, LiveDataClientFactory)` check in `nautilus_trader/live/node_builder.py`.
-Closure is fully planned in [`PYTHON_INTEGRATION_PLAN.md`](./PYTHON_INTEGRATION_PLAN.md)
-(9 atomic steps, ~6–10 hours of focused work, mirrors the bitmex pattern).
+| Path | Status |
+|---|---|
+| Rust `LiveNode::builder().add_data_client(...)` | ✅ live-verified — 50K+ QuoteTicks streamed |
+| Rust standalone (`ThetaDataHistoricalClient` direct) | ✅ live-verified — 41.9M-trade catalog |
+| Python `TradingNode.add_data_client_factory("THETADATA", ThetaDataLiveDataClientFactory)` | ✅ |
+| Python `ImportableConfig` (YAML/JSON node configs) | ✅ |
+
+The Python orchestrator wraps two pyo3 primitives (`nautilus_pyo3.ThetaDataHttpClient`
+and `nautilus_pyo3.ThetaDataWsClient`) and routes engine commands through them.
+See `docs/integrations/thetadata.md` for the TradingNode example. The Rust
+`ThetaDataDataClient` remains for `LiveNode` consumers — both paths coexist.
 
 ## See also
 
 - Full integration guide: `docs/integrations/thetadata.md`
-- Python integration gap + plan: [`PYTHON_INTEGRATION_PLAN.md`](./PYTHON_INTEGRATION_PLAN.md)
+- Python integration plan (now executed): [`PYTHON_INTEGRATION_PLAN.md`](./PYTHON_INTEGRATION_PLAN.md)
 - Adapter architecture rules: `.claude/skills/nautilus-expert/rules/adapter-architecture.md`
