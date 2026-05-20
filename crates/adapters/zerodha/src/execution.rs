@@ -51,7 +51,21 @@ use crate::{error::ZerodhaError, http::ZerodhaHttpClient, instruments::ZerodhaIn
 // -------------------------------------------------------------------------------------------------
 
 /// Kite order variety (the `{variety}` path segment on `/orders/{variety}`).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(
+        eq,
+        eq_int,
+        from_py_object,
+        module = "nautilus_trader.core.nautilus_pyo3.zerodha"
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.zerodha")
+)]
 pub enum KiteVariety {
     /// Regular open-market order.
     Regular,
@@ -84,7 +98,20 @@ impl KiteVariety {
 }
 
 /// Kite product (margin / settlement class).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(
+        eq,
+        eq_int,
+        from_py_object,
+        module = "nautilus_trader.core.nautilus_pyo3.zerodha"
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.zerodha")
+)]
 pub enum KiteProduct {
     /// Cash-and-carry (delivery; equity only).
     Cnc,
