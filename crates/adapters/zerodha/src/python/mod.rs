@@ -18,6 +18,7 @@
     reason = "errors documented on underlying Rust methods"
 )]
 
+pub mod client;
 pub mod factories;
 
 use nautilus_common::factories::{ClientConfig, DataClientFactory, ExecutionClientFactory};
@@ -95,6 +96,7 @@ pub fn zerodha(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ZerodhaExecClientConfig>()?;
     m.add_class::<ZerodhaDataClientFactory>()?;
     m.add_class::<ZerodhaExecutionClientFactory>()?;
+    m.add_class::<client::PyZerodhaClient>()?;
 
     let registry = get_global_pyo3_registry();
 

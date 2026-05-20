@@ -8,11 +8,11 @@
 """
 Python `LiveMarketDataClient` subclass for Zerodha.
 
-Phase 8 minimum-viable surface: lets ``node.build()`` succeed and the strategy register
-subscriptions. The actual subscribe → ticker WebSocket → strategy data flow requires
-wiring the Rust ``ZerodhaDataDispatcher`` primitives through PyO3 — that pass is the
-next milestone (the Rust trait impl in ``crates/adapters/zerodha/src/data_client.rs``
-already covers the equivalent surface for purely-Rust consumers).
+Delegates subscribe / unsubscribe / connect / disconnect to the Rust `PyZerodhaClient`
+façade, which composes the existing `ZerodhaWsClient` + `ZerodhaDataDispatcher` +
+forwarder. Tick data flows: Kite WS → Rust decoder → dispatcher mpsc sinks → forwarder
+task → `nautilus_common::live::runner::get_data_event_sender()` → framework data engine
+→ strategy `on_quote_tick` / `on_trade_tick` / `on_order_book` handlers.
 """
 
 import asyncio
@@ -23,6 +23,7 @@ from nautilus_trader.adapters.zerodha.providers import ZerodhaInstrumentProvider
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
+from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.data.messages import SubscribeBars
 from nautilus_trader.data.messages import SubscribeOrderBook
 from nautilus_trader.data.messages import SubscribeQuoteTicks
@@ -43,6 +44,7 @@ class ZerodhaDataClient(LiveMarketDataClient):
         self,
         loop: asyncio.AbstractEventLoop,
         client_id: ClientId,
+        rust_client: "nautilus_pyo3.zerodha.PyZerodhaClient",
         msgbus: MessageBus,
         cache: Cache,
         clock: LiveClock,
@@ -60,31 +62,40 @@ class ZerodhaDataClient(LiveMarketDataClient):
             instrument_provider=instrument_provider,
             config=config,
         )
+        self._rust = rust_client
         self._config = config
 
     async def _connect(self) -> None:
-        self._log.info("ZerodhaDataClient connected (Phase 8 stub — no live WS yet)")
+        await self._rust.connect()
+        self._log.info("ZerodhaDataClient connected to Kite ticker WebSocket")
 
     async def _disconnect(self) -> None:
+        await self._rust.close()
         self._log.info("ZerodhaDataClient disconnected")
 
     async def _subscribe_quote_ticks(self, command: SubscribeQuoteTicks) -> None:
-        self._log.info(f"subscribe_quote_ticks({command.instrument_id}) — Phase 8 stub")
+        await self._rust.subscribe_quotes(str(command.instrument_id))
+        self._log.info(f"Subscribed quotes: {command.instrument_id}")
 
     async def _unsubscribe_quote_ticks(self, command: UnsubscribeQuoteTicks) -> None:
-        self._log.info(f"unsubscribe_quote_ticks({command.instrument_id})")
+        await self._rust.unsubscribe_quotes(str(command.instrument_id))
 
     async def _subscribe_trade_ticks(self, command: SubscribeTradeTicks) -> None:
-        self._log.info(f"subscribe_trade_ticks({command.instrument_id}) — Phase 8 stub")
+        await self._rust.subscribe_trades(str(command.instrument_id))
+        self._log.info(f"Subscribed trades: {command.instrument_id}")
 
     async def _unsubscribe_trade_ticks(self, command: UnsubscribeTradeTicks) -> None:
-        self._log.info(f"unsubscribe_trade_ticks({command.instrument_id})")
+        await self._rust.unsubscribe_trades(str(command.instrument_id))
 
     async def _subscribe_order_book_snapshots(self, command: SubscribeOrderBook) -> None:
-        self._log.info(f"subscribe_order_book_snapshots({command.instrument_id}) — Phase 8 stub")
+        await self._rust.subscribe_book(str(command.instrument_id))
+        self._log.info(f"Subscribed book: {command.instrument_id}")
 
     async def _unsubscribe_order_book_snapshots(self, command: UnsubscribeOrderBook) -> None:
-        self._log.info(f"unsubscribe_order_book_snapshots({command.instrument_id})")
+        await self._rust.unsubscribe_book(str(command.instrument_id))
 
     async def _subscribe_bars(self, command: SubscribeBars) -> None:
-        self._log.info(f"subscribe_bars({command.bar_type}) — Phase 8 stub")
+        # Phase 4 historical bars come via request_bars (request/response), not subscribe.
+        self._log.warning(
+            f"subscribe_bars({command.bar_type}) not supported — use request_bars instead",
+        )

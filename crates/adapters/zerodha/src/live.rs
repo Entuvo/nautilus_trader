@@ -80,7 +80,7 @@ impl ZerodhaWsClient {
         let (event_tx, event_rx) = mpsc::channel::<WsEvent>(WS_EVENT_CHANNEL_CAPACITY);
         let dropped_events = Arc::new(AtomicU64::new(0));
 
-        let handle = tokio::spawn(run_handler(
+        let handle = nautilus_common::live::get_runtime().spawn(run_handler(
             session.clone(),
             base_url,
             state.clone(),

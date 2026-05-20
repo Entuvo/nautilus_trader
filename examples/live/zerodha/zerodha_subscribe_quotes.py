@@ -35,6 +35,7 @@ from nautilus_trader.adapters.zerodha import ZerodhaDataClientConfig
 from nautilus_trader.adapters.zerodha import ZerodhaLiveDataClientFactory
 from nautilus_trader.config import LiveExecEngineConfig
 from nautilus_trader.config import LoggingConfig
+from nautilus_trader.config import RoutingConfig
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.data import QuoteTick
@@ -83,7 +84,9 @@ config_node = TradingNodeConfig(
     logging=LoggingConfig(log_level="INFO", use_pyo3=True),
     exec_engine=LiveExecEngineConfig(reconciliation=False),
     data_clients={
-        ZERODHA: ZerodhaDataClientConfig(),
+        ZERODHA: ZerodhaDataClientConfig(
+            routing=RoutingConfig(venues=frozenset({"NSE", "BSE", "NFO", "BFO", "MCX", "CDS"})),
+        ),
     },
     timeout_connection=20.0,
     timeout_disconnection=5.0,

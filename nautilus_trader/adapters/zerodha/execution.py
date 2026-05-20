@@ -8,9 +8,10 @@
 """
 Python `LiveExecutionClient` subclass for Zerodha.
 
-Phase 8 minimum-viable surface mirroring the data client. Lets ``node.build()`` succeed
-when an exec client is registered. The actual submit/modify/cancel routing requires
-PyO3 exposure of the Rust ``ZerodhaExecClient`` — landing next.
+Delegates the cancel path to the Rust `PyZerodhaClient`. submit / modify are still
+stubs — they need the SubmitOrder → SubmitRequest field mapping (we have it in
+Rust ``execution_client.rs``) re-exposed through PyZerodhaClient. Cancel works
+because its mapping is trivial (just the client_order_id).
 """
 
 import asyncio
@@ -21,6 +22,7 @@ from nautilus_trader.adapters.zerodha.providers import ZerodhaInstrumentProvider
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
+from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.execution.messages import CancelOrder
 from nautilus_trader.execution.messages import ModifyOrder
 from nautilus_trader.execution.messages import SubmitOrder
@@ -42,6 +44,7 @@ class ZerodhaExecutionClient(LiveExecutionClient):
         loop: asyncio.AbstractEventLoop,
         client_id: ClientId,
         account_id: AccountId,
+        rust_client: "nautilus_pyo3.zerodha.PyZerodhaClient",
         msgbus: MessageBus,
         cache: Cache,
         clock: LiveClock,
@@ -62,20 +65,30 @@ class ZerodhaExecutionClient(LiveExecutionClient):
             clock=clock,
             config=config,
         )
+        self._rust = rust_client
         self._account_id = account_id
         self._config = config
 
     async def _connect(self) -> None:
-        self._log.info("ZerodhaExecutionClient connected (Phase 8 stub — no live REST yet)")
+        # The shared PyZerodhaClient also drives the data side which calls .connect() — we
+        # don't open another WS here. The exec REST surface is already usable through
+        # `submit_order` / `cancel_order` without an explicit connect step.
+        self._log.info("ZerodhaExecutionClient ready")
 
     async def _disconnect(self) -> None:
         self._log.info("ZerodhaExecutionClient disconnected")
 
     async def _submit_order(self, command: SubmitOrder) -> None:
-        self._log.info(f"submit_order({command.client_order_id}) — Phase 8 stub")
+        # TODO(step 2): map SubmitOrder.order_init → PyZerodhaClient.submit_order.
+        self._log.warning(
+            f"submit_order({command.client_order_id}) not yet wired through PyZerodhaClient",
+        )
 
     async def _modify_order(self, command: ModifyOrder) -> None:
-        self._log.info(f"modify_order({command.client_order_id}) — Phase 8 stub")
+        self._log.warning(
+            f"modify_order({command.client_order_id}) not yet wired through PyZerodhaClient",
+        )
 
     async def _cancel_order(self, command: CancelOrder) -> None:
-        self._log.info(f"cancel_order({command.client_order_id}) — Phase 8 stub")
+        await self._rust.cancel_order(str(command.client_order_id))
+        self._log.info(f"Cancel sent: {command.client_order_id}")
