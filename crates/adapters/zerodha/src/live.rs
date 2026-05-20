@@ -32,6 +32,7 @@ use std::{
 
 use ahash::HashSet;
 use anyhow::Result;
+use nautilus_cryptography::providers::install_cryptographic_provider;
 use tokio::{
     sync::{Mutex, mpsc},
     task::JoinHandle,
@@ -71,6 +72,7 @@ impl ZerodhaWsClient {
     /// `base_url` defaults to [`WS_BASE`] when `None` — tests pass a mock server's URL here.
     #[must_use]
     pub fn spawn(session: Arc<ZerodhaSessionManager>, base_url: Option<String>) -> Self {
+        install_cryptographic_provider();
         let base_url = base_url.unwrap_or_else(|| WS_BASE.to_string());
         let state = Arc::new(AtomicU8::new(ConnectionState::Disconnected as u8));
         let subscriptions: Arc<RwLock<HashSet<u32>>> = Arc::new(RwLock::new(HashSet::default()));

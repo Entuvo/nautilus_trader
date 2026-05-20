@@ -27,6 +27,7 @@
 use std::{num::NonZeroU32, sync::Arc};
 
 use anyhow::Result;
+use nautilus_cryptography::providers::install_cryptographic_provider;
 use nautilus_network::ratelimiter::{RateLimiter, clock::MonotonicClock, quota::Quota};
 use reqwest::{Method, Response, StatusCode};
 use serde::de::DeserializeOwned;
@@ -71,6 +72,7 @@ impl ZerodhaHttpClient {
     /// Panics if [`SUBMIT_RATE_PER_SEC`] is set to zero or yields an invalid per-second quota.
     /// Both are compile-time invariants of the workspace constants.
     pub fn new(session: Arc<ZerodhaSessionManager>, base_url: Option<String>) -> Result<Self> {
+        install_cryptographic_provider();
         let inner = reqwest::Client::builder()
             .user_agent("nautilus-zerodha")
             .build()
