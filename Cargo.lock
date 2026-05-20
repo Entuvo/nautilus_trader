@@ -6778,6 +6778,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
+ "axum",
  "bon",
  "chrono",
  "chrono-tz",
