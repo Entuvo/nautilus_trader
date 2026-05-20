@@ -111,3 +111,9 @@ name = "zerodha-ws-capture"
 path = "examples/ws_capture.rs"
 required-features = ["live"]
 doc = false
+
+[[example]]
+name = "zerodha-exec-smoke"
+path = "examples/exec_smoke.rs"
+required-features = ["live"]
+doc = false
