@@ -25,16 +25,22 @@ use std::{
     time::{Duration, Instant},
 };
 
+use std::str::FromStr;
+
 use nautilus_core::python::{to_pyruntime_err, to_pyvalue_err};
-use nautilus_model::identifiers::{ClientOrderId, InstrumentId};
+use nautilus_model::{
+    enums::{OrderSide, OrderType, TimeInForce},
+    identifiers::{ClientOrderId, InstrumentId},
+    types::{Price, Quantity},
+};
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::gen_stub_pyclass;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as TokioMutex, mpsc};
 
 use crate::{
     common::{REST_BASE, WS_BASE, WS_EVENT_CHANNEL_CAPACITY},
     data::{DispatchSinks, ZerodhaDataDispatcher},
-    execution::ZerodhaExecClient,
+    execution::{KiteProduct, KiteVariety, SubmitRequest, ZerodhaExecClient},
     factories::{SharedDeps, get_or_build_shared},
     instruments::{ValidationLimits, load_all},
     live::ZerodhaWsClient,
@@ -51,7 +57,9 @@ pub struct PyZerodhaClient {
     dispatcher: Arc<ZerodhaDataDispatcher>,
     exec: Arc<ZerodhaExecClient>,
     is_connected: Arc<AtomicBool>,
-    sink_rxs: std::sync::Mutex<Option<SinkReceivers>>,
+    quote_rx: Arc<TokioMutex<mpsc::Receiver<nautilus_model::data::QuoteTick>>>,
+    trade_rx: Arc<TokioMutex<mpsc::Receiver<nautilus_model::data::TradeTick>>>,
+    depth_rx: Arc<TokioMutex<mpsc::Receiver<nautilus_model::data::depth::OrderBookDepth10>>>,
 }
 
 impl std::fmt::Debug for PyZerodhaClient {
@@ -60,13 +68,6 @@ impl std::fmt::Debug for PyZerodhaClient {
             .field("is_connected", &self.is_connected.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
-}
-
-#[allow(dead_code)] // receivers parked until tick-forwarding lands; see py_connect comment
-struct SinkReceivers {
-    quotes: mpsc::Receiver<nautilus_model::data::QuoteTick>,
-    trades: mpsc::Receiver<nautilus_model::data::TradeTick>,
-    depths: mpsc::Receiver<nautilus_model::data::depth::OrderBookDepth10>,
 }
 
 #[pymethods]
@@ -122,11 +123,9 @@ impl PyZerodhaClient {
             dispatcher,
             exec,
             is_connected: Arc::new(AtomicBool::new(false)),
-            sink_rxs: std::sync::Mutex::new(Some(SinkReceivers {
-                quotes: qrx,
-                trades: trx,
-                depths: drx,
-            })),
+            quote_rx: Arc::new(TokioMutex::new(qrx)),
+            trade_rx: Arc::new(TokioMutex::new(trx)),
+            depth_rx: Arc::new(TokioMutex::new(drx)),
         })
     }
 
@@ -137,19 +136,6 @@ impl PyZerodhaClient {
         let ws = self.ws.clone();
         let is_connected = self.is_connected.clone();
         let shared = self.shared.clone();
-        let sink_rxs = {
-            let mut guard = self
-                .sink_rxs
-                .lock()
-                .map_err(|_| to_pyruntime_err("sink_rxs poisoned"))?;
-            guard.take()
-        };
-        // NOTE: tick → runner forwarding is intentionally NOT spawned here. The runner's
-        // `get_data_event_sender()` thread-local is only accessible from the runner thread,
-        // but the pyo3 future runs on a Tokio worker. Wiring the forwarder properly requires
-        // the Python `ZerodhaDataClient._connect()` to push events through msgbus.publish
-        // directly — see the open TODO in data.py. For now the dispatcher's sink channels
-        // back up; subscribe/cancel still work, but ticks don't reach `on_quote_tick` yet.
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             if is_connected.load(Ordering::Acquire) {
                 return Ok(Python::attach(|py| py.None()));
@@ -177,12 +163,40 @@ impl PyZerodhaClient {
                     "ZerodhaWsClient did not connect within 15 s",
                 ));
             }
-            // Drop the sink receivers so the dispatcher's channels don't deadlock on full
-            // mpsc buffers while no consumer exists yet. We'll re-create them when the
-            // tick-forwarding path is properly wired in the follow-up commit.
-            drop(sink_rxs);
             is_connected.store(true, Ordering::Release);
             Ok(Python::attach(|py| py.None()))
+        })
+    }
+
+    /// Await the next quote tick from the dispatcher. Returns `None` once the dispatcher's
+    /// sender is dropped (i.e. on shutdown). Python forwarder loops on this and calls
+    /// `LiveMarketDataClient._handle_data` per tick.
+    #[pyo3(name = "next_quote")]
+    fn py_next_quote<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let rx = self.quote_rx.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut guard = rx.lock().await;
+            Ok(guard.recv().await)
+        })
+    }
+
+    /// Await the next trade tick. See [`py_next_quote`].
+    #[pyo3(name = "next_trade")]
+    fn py_next_trade<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let rx = self.trade_rx.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut guard = rx.lock().await;
+            Ok(guard.recv().await)
+        })
+    }
+
+    /// Await the next L2 depth snapshot. See [`py_next_quote`].
+    #[pyo3(name = "next_depth")]
+    fn py_next_depth<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let rx = self.depth_rx.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut guard = rx.lock().await;
+            Ok(guard.recv().await)
         })
     }
 
@@ -325,6 +339,103 @@ impl PyZerodhaClient {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             exec.cancel_order(cid).await.map_err(to_pyvalue_err)?;
             Ok(Python::attach(|py| py.None()))
+        })
+    }
+
+    /// Submit an order. Enums are passed as their Nautilus string form
+    /// (`OrderSide` = "BUY"/"SELL", `OrderType` = "MARKET"/"LIMIT"/"STOP_MARKET"/"STOP_LIMIT",
+    /// `TimeInForce` = "DAY"/"IOC"). `product` is the Kite-native form ("MIS"/"CNC"/"NRML")
+    /// — defaults to "MIS" when `None`.
+    #[pyo3(name = "submit_order", signature = (
+        client_order_id,
+        instrument_id,
+        order_side,
+        order_type,
+        time_in_force,
+        quantity,
+        price = None,
+        trigger_price = None,
+        product = None,
+        price_precision = 2,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn py_submit_order<'py>(
+        &self,
+        py: Python<'py>,
+        client_order_id: String,
+        instrument_id: String,
+        order_side: String,
+        order_type: String,
+        time_in_force: String,
+        quantity: f64,
+        price: Option<f64>,
+        trigger_price: Option<f64>,
+        product: Option<String>,
+        price_precision: u8,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let exec = self.exec.clone();
+        let side = OrderSide::from_str(&order_side).map_err(to_pyvalue_err)?;
+        let otype = OrderType::from_str(&order_type).map_err(to_pyvalue_err)?;
+        let tif = TimeInForce::from_str(&time_in_force).map_err(to_pyvalue_err)?;
+        let product = match product.as_deref().unwrap_or("MIS") {
+            "MIS" => KiteProduct::Mis,
+            "CNC" => KiteProduct::Cnc,
+            "NRML" => KiteProduct::Nrml,
+            other => return Err(to_pyvalue_err(format!("unknown product {other}"))),
+        };
+        let qty = Quantity::new(quantity, 0);
+        let price = price
+            .map(|p| Price::new(p, price_precision))
+            ;
+        let trigger_price = trigger_price
+            .map(|p| Price::new(p, price_precision))
+            ;
+        let req = SubmitRequest {
+            client_order_id: ClientOrderId::from(client_order_id.as_str()),
+            instrument_id: InstrumentId::from(instrument_id.as_str()),
+            order_side: side,
+            order_type: otype,
+            time_in_force: tif,
+            quantity: qty,
+            price,
+            trigger_price,
+            variety: KiteVariety::Regular,
+            product,
+        };
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let kite_order_id = exec.submit_order(&req).await.map_err(to_pyvalue_err)?;
+            Ok(kite_order_id)
+        })
+    }
+
+    /// Modify an order. At least one of `quantity`, `price`, `trigger_price` must be set.
+    #[pyo3(name = "modify_order", signature = (
+        client_order_id,
+        quantity = None,
+        price = None,
+        trigger_price = None,
+        price_precision = 2,
+    ))]
+    fn py_modify_order<'py>(
+        &self,
+        py: Python<'py>,
+        client_order_id: String,
+        quantity: Option<f64>,
+        price: Option<f64>,
+        trigger_price: Option<f64>,
+        price_precision: u8,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let exec = self.exec.clone();
+        let cid = ClientOrderId::from(client_order_id.as_str());
+        let qty = quantity.map(|q| Quantity::new(q, 0));
+        let price = price.map(|p| Price::new(p, price_precision));
+        let trig = trigger_price.map(|p| Price::new(p, price_precision));
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let new_id = exec
+                .modify_order(cid, qty, price, trig)
+                .await
+                .map_err(to_pyvalue_err)?;
+            Ok(new_id)
         })
     }
 }

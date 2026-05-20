@@ -67,11 +67,51 @@ class ZerodhaDataClient(LiveMarketDataClient):
 
     async def _connect(self) -> None:
         await self._rust.connect()
+        # Drain the Rust dispatcher's mpsc sinks via async polls; each tick is published
+        # through `_handle_data` (the standard LiveMarketDataClient hook) so it lands in
+        # `Strategy.on_quote_tick` / `on_trade_tick` / `on_order_book` like any other adapter.
+        self._forwarders = [
+            self._loop.create_task(self._forward_quotes()),
+            self._loop.create_task(self._forward_trades()),
+            self._loop.create_task(self._forward_depths()),
+        ]
         self._log.info("ZerodhaDataClient connected to Kite ticker WebSocket")
 
     async def _disconnect(self) -> None:
+        for task in getattr(self, "_forwarders", ()):
+            task.cancel()
         await self._rust.close()
         self._log.info("ZerodhaDataClient disconnected")
+
+    async def _forward_quotes(self) -> None:
+        try:
+            while True:
+                tick = await self._rust.next_quote()
+                if tick is None:
+                    return
+                self._handle_data(tick)
+        except asyncio.CancelledError:
+            return
+
+    async def _forward_trades(self) -> None:
+        try:
+            while True:
+                tick = await self._rust.next_trade()
+                if tick is None:
+                    return
+                self._handle_data(tick)
+        except asyncio.CancelledError:
+            return
+
+    async def _forward_depths(self) -> None:
+        try:
+            while True:
+                depth = await self._rust.next_depth()
+                if depth is None:
+                    return
+                self._handle_data(depth)
+        except asyncio.CancelledError:
+            return
 
     async def _subscribe_quote_ticks(self, command: SubscribeQuoteTicks) -> None:
         await self._rust.subscribe_quotes(str(command.instrument_id))

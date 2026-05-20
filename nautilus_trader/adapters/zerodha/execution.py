@@ -79,15 +79,46 @@ class ZerodhaExecutionClient(LiveExecutionClient):
         self._log.info("ZerodhaExecutionClient disconnected")
 
     async def _submit_order(self, command: SubmitOrder) -> None:
-        # TODO(step 2): map SubmitOrder.order_init → PyZerodhaClient.submit_order.
-        self._log.warning(
-            f"submit_order({command.client_order_id}) not yet wired through PyZerodhaClient",
-        )
+        order = command.order
+        instrument = self._cache.instrument(command.instrument_id)
+        price_precision = instrument.price_precision if instrument is not None else 2
+        try:
+            kite_order_id = await self._rust.submit_order(
+                client_order_id=str(command.client_order_id),
+                instrument_id=str(command.instrument_id),
+                order_side=order.side.name,
+                order_type=order.order_type.name,
+                time_in_force=order.time_in_force.name,
+                quantity=float(order.quantity),
+                price=float(order.price) if getattr(order, "price", None) is not None else None,
+                trigger_price=(
+                    float(order.trigger_price)
+                    if getattr(order, "trigger_price", None) is not None
+                    else None
+                ),
+                product=self._config.default_product,
+                price_precision=price_precision,
+            )
+            self._log.info(f"Submitted {command.client_order_id} → kite_order_id={kite_order_id}")
+        except Exception as e:
+            self._log.error(f"submit_order({command.client_order_id}) failed: {e}")
 
     async def _modify_order(self, command: ModifyOrder) -> None:
-        self._log.warning(
-            f"modify_order({command.client_order_id}) not yet wired through PyZerodhaClient",
-        )
+        instrument = self._cache.instrument(command.instrument_id)
+        price_precision = instrument.price_precision if instrument is not None else 2
+        try:
+            await self._rust.modify_order(
+                client_order_id=str(command.client_order_id),
+                quantity=float(command.quantity) if command.quantity is not None else None,
+                price=float(command.price) if command.price is not None else None,
+                trigger_price=(
+                    float(command.trigger_price) if command.trigger_price is not None else None
+                ),
+                price_precision=price_precision,
+            )
+            self._log.info(f"Modify sent: {command.client_order_id}")
+        except Exception as e:
+            self._log.error(f"modify_order({command.client_order_id}) failed: {e}")
 
     async def _cancel_order(self, command: CancelOrder) -> None:
         await self._rust.cancel_order(str(command.client_order_id))
