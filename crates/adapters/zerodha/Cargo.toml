@@ -88,10 +88,15 @@ pyo3-stub-gen = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+criterion = { workspace = true }
 env_logger = "0.11"
 rstest = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+
+[[bench]]
+name = "decode_bench"
+harness = false
 
 [[example]]
 name = "zerodha-smoke-connect"
