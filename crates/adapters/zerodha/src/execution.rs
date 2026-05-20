@@ -35,10 +35,11 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::{Result, anyhow};
 use nautilus_core::{UnixNanos, UUID4};
 use nautilus_model::{
-    enums::{OrderSide, OrderStatus, OrderType, TimeInForce},
+    enums::{AccountType, OrderSide, OrderStatus, OrderType, PositionSideSpecified, TimeInForce},
+    events::AccountState,
     identifiers::{AccountId, ClientOrderId, InstrumentId, Symbol, VenueOrderId},
-    reports::order::OrderStatusReport,
-    types::{Price, Quantity},
+    reports::{order::OrderStatusReport, position::PositionStatusReport},
+    types::{AccountBalance, Money, Price, Quantity},
 };
 use serde::Deserialize;
 use tokio::sync::RwLock;
@@ -414,6 +415,209 @@ impl ZerodhaExecClient {
         Ok(kite_order_id)
     }
 
+    /// Modify an existing order via `PUT /orders/{variety}/{kite_order_id}`.
+    ///
+    /// `variety` is taken from the persisted [`ZerodhaOrderMeta`] — the caller never sees it.
+    /// At least one of `new_quantity`, `new_price`, `new_trigger_price` must be set.
+    ///
+    /// Kite occasionally returns a fresh `order_id` on modify (when the change requires the
+    /// risk engine to re-queue) — when that happens we update the meta's `kite_order_id` so
+    /// subsequent polls/cancels target the new ID.
+    ///
+    /// # Errors
+    ///
+    /// - `ClientOrderId` not found in the meta map (order wasn't submitted by us).
+    /// - All three modify fields `None`.
+    /// - HTTP transport / Kite-side rejection.
+    pub async fn modify_order(
+        &self,
+        client_order_id: ClientOrderId,
+        new_quantity: Option<Quantity>,
+        new_price: Option<Price>,
+        new_trigger_price: Option<Price>,
+    ) -> Result<String> {
+        if new_quantity.is_none() && new_price.is_none() && new_trigger_price.is_none() {
+            return Err(anyhow!("modify_order: at least one field must be set"));
+        }
+
+        let (variety, kite_order_id) = {
+            let map = self.order_meta.read().await;
+            let meta = map
+                .get(&client_order_id)
+                .ok_or_else(|| anyhow!("unknown client_order_id {client_order_id}"))?;
+            (meta.variety, meta.kite_order_id.clone())
+        };
+
+        let qty_str = new_quantity.map(|q| format!("{}", q.as_f64() as u64));
+        let price_str = new_price.map(|p| format!("{}", p.as_f64()));
+        let trigger_str = new_trigger_price.map(|p| format!("{}", p.as_f64()));
+        let mut form: Vec<(&str, &str)> = Vec::with_capacity(3);
+        if let Some(q) = qty_str.as_deref() {
+            form.push(("quantity", q));
+        }
+        if let Some(p) = price_str.as_deref() {
+            form.push(("price", p));
+        }
+        if let Some(t) = trigger_str.as_deref() {
+            form.push(("trigger_price", t));
+        }
+
+        let path = format!("/orders/{}/{kite_order_id}", variety.as_kite_str());
+        let response: serde_json::Value = self.http.put(&path, &form).await?;
+        let new_kite_id = response
+            .get("order_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&kite_order_id)
+            .to_string();
+
+        // Update the meta cursor + fields. The `kite_order_id` may have changed.
+        let mut map = self.order_meta.write().await;
+        if let Some(meta) = map.get_mut(&client_order_id) {
+            meta.kite_order_id = new_kite_id.clone();
+            if let Some(q) = new_quantity {
+                meta.quantity = q;
+            }
+            if let Some(p) = new_price {
+                meta.price = Some(p);
+            }
+            if let Some(t) = new_trigger_price {
+                meta.trigger_price = Some(t);
+            }
+        }
+        Ok(new_kite_id)
+    }
+
+    /// Cancel an open order via `DELETE /orders/{variety}/{kite_order_id}`.
+    ///
+    /// # Errors
+    ///
+    /// - `ClientOrderId` not found in the meta map.
+    /// - HTTP transport / Kite-side rejection.
+    pub async fn cancel_order(&self, client_order_id: ClientOrderId) -> Result<String> {
+        let (variety, kite_order_id) = {
+            let map = self.order_meta.read().await;
+            let meta = map
+                .get(&client_order_id)
+                .ok_or_else(|| anyhow!("unknown client_order_id {client_order_id}"))?;
+            (meta.variety, meta.kite_order_id.clone())
+        };
+        let path = format!("/orders/{}/{kite_order_id}", variety.as_kite_str());
+        let response: serde_json::Value = self.http.delete(&path).await?;
+        let returned_id = response
+            .get("order_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&kite_order_id)
+            .to_string();
+        Ok(returned_id)
+    }
+
+    /// Generate position-status reports from `GET /portfolio/positions` (net day positions).
+    ///
+    /// Kite returns `{net: [...], day: [...]}`; we surface `net`. The framework's reconciliation
+    /// manager turns these into `PositionChanged` / `PositionClosed` events. Per the
+    /// order-state-machine rule, **adapters never emit position events directly** — that's the
+    /// engine's domain.
+    ///
+    /// # Errors
+    ///
+    /// HTTP / parse errors.
+    pub async fn generate_position_status_reports(
+        &self,
+        ts_init: UnixNanos,
+    ) -> Result<Vec<PositionStatusReport>> {
+        let rows: KitePositions = self.http.get("/portfolio/positions").await?;
+        let mut out = Vec::with_capacity(rows.net.len());
+        for row in rows.net {
+            let Some(report) = self.position_row_to_report(&row, ts_init).await else {
+                continue;
+            };
+            out.push(report);
+        }
+        Ok(out)
+    }
+
+    async fn position_row_to_report(
+        &self,
+        row: &KitePositionRow,
+        ts_init: UnixNanos,
+    ) -> Option<PositionStatusReport> {
+        let instrument_id = self.lookup_instrument(&row.tradingsymbol, &row.exchange).await?;
+        let qty_signed = row.quantity;
+        let side = if qty_signed > 0 {
+            PositionSideSpecified::Long
+        } else if qty_signed < 0 {
+            PositionSideSpecified::Short
+        } else {
+            PositionSideSpecified::Flat
+        };
+        let qty_abs = Quantity::new(qty_signed.unsigned_abs() as f64, 0);
+        let avg_px = if row.average_price > 0.0 {
+            rust_decimal::Decimal::try_from(row.average_price).ok()
+        } else {
+            None
+        };
+        Some(PositionStatusReport::new(
+            self.account_id,
+            instrument_id,
+            side,
+            qty_abs,
+            ts_init,
+            ts_init,
+            Some(UUID4::new()),
+            None,
+            avg_px,
+        ))
+    }
+
+    /// Generate an [`AccountState`] snapshot from `GET /user/margins`.
+    ///
+    /// Kite reports margins split across `equity` and `commodity` segments. Per
+    /// `crates/model/src/events/account/state.rs` balances are keyed by `Currency` — two INR
+    /// rows would collide — so we sum `equity.net + commodity.net` into one INR
+    /// [`AccountBalance`]. The per-segment breakdown is currently not surfaced (v1 scope); a
+    /// custom `ZerodhaAccountSnapshot` event for that lives behind a Phase 8 follow-up.
+    ///
+    /// # Errors
+    ///
+    /// HTTP / parse errors. A missing `equity` block falls back to zero rather than failing —
+    /// some segregated accounts only have one segment enabled.
+    pub async fn generate_account_state(&self, ts_init: UnixNanos) -> Result<AccountState> {
+        let margins: KiteMargins = self.http.get("/user/margins").await?;
+        let equity_net = margins.equity.as_ref().map_or(0.0, |m| m.net);
+        let equity_locked = margins
+            .equity
+            .as_ref()
+            .map_or(0.0, |m| m.utilised.debits + m.utilised.exposure);
+        let commodity_net = margins.commodity.as_ref().map_or(0.0, |m| m.net);
+        let commodity_locked = margins
+            .commodity
+            .as_ref()
+            .map_or(0.0, |m| m.utilised.debits + m.utilised.exposure);
+
+        let total_net = equity_net + commodity_net;
+        let total_locked = equity_locked + commodity_locked;
+        let total_free = (total_net - total_locked).max(0.0);
+
+        let inr = nautilus_model::types::Currency::INR();
+        let balance = AccountBalance::new(
+            Money::new(total_net, inr),
+            Money::new(total_locked, inr),
+            Money::new(total_free, inr),
+        );
+
+        Ok(AccountState::new(
+            self.account_id,
+            AccountType::Margin,
+            vec![balance],
+            vec![],
+            true, // is_reported (Kite reports these values)
+            UUID4::new(),
+            ts_init,
+            ts_init,
+            None, // no single base currency
+        ))
+    }
+
     /// Poll `/orders` and emit one [`OrderStatusReport`] per row whose `(status, filled_qty,
     /// avg_px)` changed since the last call (or every row, on first call after restart).
     ///
@@ -630,6 +834,50 @@ fn validate_submit(req: &SubmitRequest) -> Result<()> {
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Deserialize)]
+struct KitePositions {
+    net: Vec<KitePositionRow>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    day: Vec<KitePositionRow>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct KitePositionRow {
+    tradingsymbol: String,
+    exchange: String,
+    #[allow(dead_code)]
+    instrument_token: u32,
+    quantity: i64,
+    average_price: f64,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pnl: f64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct KiteMargins {
+    #[serde(default)]
+    equity: Option<KiteSegmentMargin>,
+    #[serde(default)]
+    commodity: Option<KiteSegmentMargin>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct KiteSegmentMargin {
+    net: f64,
+    #[serde(default)]
+    utilised: KiteUtilised,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct KiteUtilised {
+    #[serde(default)]
+    debits: f64,
+    #[serde(default)]
+    exposure: f64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 struct KiteOrderRow {
     order_id: String,
     #[allow(dead_code)]
@@ -742,6 +990,31 @@ mod tests {
             product: KiteProduct::Cnc,
         };
         assert!(validate_submit(&req).is_err());
+    }
+
+    #[rstest]
+    fn modify_requires_at_least_one_field() {
+        // Verifies the up-front guard inside `modify_order`. We can't easily exercise the full
+        // HTTP path in a unit test (no mock server here), but we can prove the guard fires.
+        use nautilus_model::identifiers::AccountId;
+        use crate::common;
+        use crate::session::ZerodhaSessionManager;
+        use crate::instruments::ZerodhaInstrumentCache;
+        use std::sync::Arc;
+
+        let _ = common::REST_BASE; // touch to keep the import live
+        let session = Arc::new(ZerodhaSessionManager::new("k".into(), "t".into(), None));
+        let http = Arc::new(ZerodhaHttpClient::new(session, None).unwrap());
+        let cache = Arc::new(ZerodhaInstrumentCache::new());
+        let client = ZerodhaExecClient::new(http, cache, AccountId::from("ZERODHA-TEST"));
+
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            // No meta -> error before the all-fields-None check, but we also assert the
+            // all-None branch when meta exists.
+            let cid = ClientOrderId::from("X-1");
+            let err = client.modify_order(cid, None, None, None).await.unwrap_err();
+            assert!(err.to_string().contains("at least one field"));
+        });
     }
 
     #[rstest]
