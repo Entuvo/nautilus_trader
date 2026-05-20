@@ -128,7 +128,15 @@ pub fn _clear_shared_deps_for_tests() {
 // -------------------------------------------------------------------------------------------------
 
 /// Constructs [`ZerodhaDataClient`] instances from a [`ZerodhaDataClientConfig`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(from_py_object, module = "nautilus_trader.core.nautilus_pyo3.zerodha")
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.zerodha")
+)]
 pub struct ZerodhaDataClientFactory;
 
 impl DataClientFactory for ZerodhaDataClientFactory {
@@ -169,7 +177,15 @@ impl DataClientFactory for ZerodhaDataClientFactory {
 // -------------------------------------------------------------------------------------------------
 
 /// Constructs [`ZerodhaExecutionClient`] instances from a [`ZerodhaExecClientConfig`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(from_py_object, module = "nautilus_trader.core.nautilus_pyo3.zerodha")
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.zerodha")
+)]
 pub struct ZerodhaExecutionClientFactory;
 
 impl ExecutionClientFactory for ZerodhaExecutionClientFactory {

@@ -13,9 +13,26 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Python config DTOs for the Zerodha adapter.
+Config DTOs for the Zerodha adapter — re-export of the PyO3-bound Rust ``bon::Builder``
+structs so callers can write::
 
-Phase 0 placeholder — ``ZerodhaDataClientConfig`` and ``ZerodhaExecClientConfig`` (msgspec
-``Struct`` mirroring the Rust ``bon::Builder`` configs) land in Phase 1.
+    from nautilus_trader.adapters.zerodha import ZerodhaDataClientConfig
+    cfg = ZerodhaDataClientConfig(http_timeout_secs=10)
 
+without importing from ``nautilus_pyo3`` directly.
+
+Credentials are NOT carried on these DTOs — they resolve from env vars
+(``ZERODHA_API_KEY`` / ``ZERODHA_API_SECRET`` / ``ZERODHA_ACCESS_TOKEN``) inside the Rust
+``credential.rs``.
 """
+
+from nautilus_trader.core import nautilus_pyo3
+
+
+ZerodhaDataClientConfig = nautilus_pyo3.zerodha.ZerodhaDataClientConfig
+ZerodhaExecClientConfig = nautilus_pyo3.zerodha.ZerodhaExecClientConfig
+
+__all__ = [
+    "ZerodhaDataClientConfig",
+    "ZerodhaExecClientConfig",
+]

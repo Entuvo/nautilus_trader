@@ -33,9 +33,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 use nautilus_common::{
     clients::ExecutionClient,
-    messages::execution::report::{
-        GenerateFillReports, GenerateOrderStatusReport, GenerateOrderStatusReports,
-        GeneratePositionStatusReports,
+    live::get_runtime,
+    messages::execution::{
+        CancelOrder, ModifyOrder, SubmitOrder,
+        report::{
+            GenerateFillReports, GenerateOrderStatusReport, GenerateOrderStatusReports,
+            GeneratePositionStatusReports,
+        },
     },
 };
 use nautilus_core::{UnixNanos, UUID4};
@@ -176,6 +180,53 @@ impl ExecutionClient for ZerodhaExecutionClient {
     async fn connect(&mut self) -> Result<()> {
         self.is_connected.store(true, Ordering::Relaxed);
         log::info!("ZerodhaExecutionClient connected");
+        Ok(())
+    }
+
+    fn submit_order(&self, cmd: SubmitOrder) -> Result<()> {
+        let inner = self.inner.clone();
+        let default_product = self.config.default_product;
+        get_runtime().spawn(async move {
+            let init = &cmd.order_init;
+            let req = crate::execution::SubmitRequest {
+                client_order_id: cmd.client_order_id,
+                instrument_id: cmd.instrument_id,
+                order_side: init.order_side,
+                order_type: init.order_type,
+                time_in_force: init.time_in_force,
+                quantity: init.quantity,
+                price: init.price,
+                trigger_price: init.trigger_price,
+                variety: crate::execution::KiteVariety::Regular,
+                product: default_product,
+            };
+            if let Err(e) = inner.submit_order(&req).await {
+                log::error!("submit_order({}) failed: {e}", cmd.client_order_id);
+            }
+        });
+        Ok(())
+    }
+
+    fn modify_order(&self, cmd: ModifyOrder) -> Result<()> {
+        let inner = self.inner.clone();
+        get_runtime().spawn(async move {
+            if let Err(e) = inner
+                .modify_order(cmd.client_order_id, cmd.quantity, cmd.price, cmd.trigger_price)
+                .await
+            {
+                log::error!("modify_order({}) failed: {e}", cmd.client_order_id);
+            }
+        });
+        Ok(())
+    }
+
+    fn cancel_order(&self, cmd: CancelOrder) -> Result<()> {
+        let inner = self.inner.clone();
+        get_runtime().spawn(async move {
+            if let Err(e) = inner.cancel_order(cmd.client_order_id).await {
+                log::error!("cancel_order({}) failed: {e}", cmd.client_order_id);
+            }
+        });
         Ok(())
     }
 

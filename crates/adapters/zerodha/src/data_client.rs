@@ -35,13 +35,20 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use nautilus_common::{
     clients::DataClient,
-    messages::data::{
-        SubscribeBookDepth10, SubscribeQuotes, SubscribeTrades, UnsubscribeBookDepth10,
-        UnsubscribeQuotes, UnsubscribeTrades,
+    live::{get_runtime, runner::get_data_event_sender},
+    messages::{
+        DataEvent,
+        data::{
+            SubscribeBookDepth10, SubscribeQuotes, SubscribeTrades, UnsubscribeBookDepth10,
+            UnsubscribeQuotes, UnsubscribeTrades,
+        },
     },
 };
-use nautilus_model::identifiers::{ClientId, Venue};
-use tokio::sync::mpsc;
+use nautilus_model::{
+    data::Data,
+    identifiers::{ClientId, Venue},
+};
+use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
     config::ZerodhaDataClientConfig,
@@ -57,14 +64,13 @@ pub struct ZerodhaDataClient {
     is_connected: Arc<AtomicBool>,
     ws: Arc<ZerodhaWsClient>,
     dispatcher: Arc<ZerodhaDataDispatcher>,
-    // Sinks retained until `start()` consumes them into the forwarder task (step 14b).
-    #[allow(dead_code)]
     sink_rxs: std::sync::Mutex<Option<SinkReceivers>>,
+    data_sender: mpsc::UnboundedSender<DataEvent>,
+    forwarder_task: std::sync::Mutex<Option<JoinHandle<()>>>,
     #[allow(dead_code)]
     config: ZerodhaDataClientConfig,
 }
 
-#[allow(dead_code)]
 struct SinkReceivers {
     quotes: mpsc::Receiver<nautilus_model::data::QuoteTick>,
     trades: mpsc::Receiver<nautilus_model::data::TradeTick>,
@@ -116,6 +122,10 @@ impl ZerodhaDataClient {
             2, // default INR precision; per-instrument precision comes from the cache
         ));
 
+        // get_data_event_sender uses a thread-local set by the live runner; the factory call
+        // path runs on that thread, so capturing the sender here is safe.
+        let data_sender = get_data_event_sender();
+
         Ok(Self {
             client_id,
             venue,
@@ -127,8 +137,57 @@ impl ZerodhaDataClient {
                 trades: trx,
                 depths: drx,
             })),
+            data_sender,
+            forwarder_task: std::sync::Mutex::new(None),
             config,
         })
+    }
+
+    /// Spawn the dispatcher→runner forwarder. Runs once on first `connect()`; subsequent
+    /// calls are no-ops.
+    fn spawn_forwarder(&self) -> Result<()> {
+        let sinks = {
+            let mut guard = self
+                .sink_rxs
+                .lock()
+                .map_err(|e| anyhow!("sink_rxs lock poisoned: {e}"))?;
+            guard.take()
+        };
+        let Some(SinkReceivers {
+            mut quotes,
+            mut trades,
+            mut depths,
+        }) = sinks
+        else {
+            // Already spawned.
+            return Ok(());
+        };
+        let sender = self.data_sender.clone();
+        let task = get_runtime().spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(q) = quotes.recv() => {
+                        if sender.send(DataEvent::Data(Data::Quote(q))).is_err() {
+                            log::warn!("ZerodhaDataClient forwarder: data_sender closed");
+                            break;
+                        }
+                    }
+                    Some(t) = trades.recv() => {
+                        if sender.send(DataEvent::Data(Data::Trade(t))).is_err() { break; }
+                    }
+                    Some(d) = depths.recv() => {
+                        if sender.send(DataEvent::Data(Data::Depth10(Box::new(d)))).is_err() {
+                            break;
+                        }
+                    }
+                    else => break,
+                }
+            }
+        });
+        if let Ok(mut guard) = self.forwarder_task.lock() {
+            *guard = Some(task);
+        }
+        Ok(())
     }
 }
 
@@ -174,6 +233,8 @@ impl DataClient for ZerodhaDataClient {
                 "ZerodhaDataClient: WebSocket did not connect within 15 s"
             ));
         }
+        // Spawn the forwarder on first connect so dispatcher ticks flow to the runner.
+        self.spawn_forwarder()?;
         self.is_connected.store(true, Ordering::Relaxed);
         log::info!("ZerodhaDataClient connected");
         Ok(())
@@ -181,6 +242,11 @@ impl DataClient for ZerodhaDataClient {
 
     async fn disconnect(&mut self) -> Result<()> {
         self.ws.close().await;
+        if let Ok(mut guard) = self.forwarder_task.lock()
+            && let Some(handle) = guard.take()
+        {
+            handle.abort();
+        }
         self.is_connected.store(false, Ordering::Relaxed);
         log::info!("ZerodhaDataClient disconnected");
         Ok(())
