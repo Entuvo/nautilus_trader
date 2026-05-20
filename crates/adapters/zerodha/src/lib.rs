@@ -46,6 +46,7 @@ pub mod credential;
 pub mod decode;
 pub mod error;
 pub mod historical;
+pub mod holidays;
 pub mod instruments;
 pub mod session;
 pub mod symbology;
