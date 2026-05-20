@@ -18,6 +18,8 @@
     reason = "errors documented on underlying Rust methods"
 )]
 
+pub mod factories;
+
 use nautilus_common::factories::{ClientConfig, DataClientFactory, ExecutionClientFactory};
 use nautilus_core::python::{to_pyruntime_err, to_pyvalue_err};
 use nautilus_system::get_global_pyo3_registry;
