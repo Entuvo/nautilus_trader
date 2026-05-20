@@ -6800,6 +6800,7 @@ dependencies = [
  "pyo3-stub-gen",
  "reqwest 0.13.3",
  "rstest",
+ "rust_decimal",
  "serde",
  "serde_json",
  "sha2 0.10.9",
