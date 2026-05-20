@@ -58,7 +58,13 @@ pub mod python;
 pub mod data;
 
 #[cfg(feature = "live")]
+pub mod data_client;
+
+#[cfg(feature = "live")]
 pub mod execution;
+
+#[cfg(feature = "live")]
+pub mod execution_client;
 
 #[cfg(feature = "live")]
 pub mod factories;
