@@ -30,7 +30,7 @@
 //! - Adaptive 1→5 s poll cadence under 429 → Phase 7 (we provide the function; the framework
 //!   schedules the poll).
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::SystemTime};
 
 use anyhow::{Result, anyhow};
 use nautilus_core::{UnixNanos, UUID4};
@@ -303,6 +303,7 @@ pub struct ZerodhaExecClient {
     cache: Arc<ZerodhaInstrumentCache>,
     account_id: AccountId,
     order_meta: RwLock<HashMap<ClientOrderId, ZerodhaOrderMeta>>,
+    store: Option<crate::persistence::OrderStore>,
 }
 
 impl std::fmt::Debug for ZerodhaExecClient {
@@ -317,17 +318,36 @@ impl std::fmt::Debug for ZerodhaExecClient {
 impl ZerodhaExecClient {
     /// Build a new exec client. `account_id` is whatever id the strategy is configured to use
     /// (Kite is single-account-per-key — typically `ZERODHA-{user_id}`).
+    ///
+    /// `store` is the optional on-disk persistence layer. Passing `None` keeps the order-meta
+    /// map purely in-memory — fine for tests and short-lived scripts; production deployments
+    /// want a path so a node restart doesn't orphan live orders.
     #[must_use]
     pub fn new(
         http: Arc<ZerodhaHttpClient>,
         cache: Arc<ZerodhaInstrumentCache>,
         account_id: AccountId,
+        store: Option<crate::persistence::OrderStore>,
     ) -> Self {
         Self {
             http,
             cache,
             account_id,
             order_meta: RwLock::new(HashMap::new()),
+            store,
+        }
+    }
+
+    /// Persist the current order-meta map if a store is configured. Best-effort: a persistence
+    /// failure logs a warning rather than failing the calling operation — losing the latest
+    /// few writes is preferable to refusing an order submit because the disk filled up.
+    async fn persist_if_enabled(&self) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let snapshot = self.order_meta.read().await.clone();
+        if let Err(e) = store.save(&snapshot).await {
+            log::warn!("order-meta persist failed (best-effort): {e}");
         }
     }
 
@@ -412,6 +432,7 @@ impl ZerodhaExecClient {
             last_avg_px: None,
         };
         self.order_meta.write().await.insert(req.client_order_id, meta);
+        self.persist_if_enabled().await;
         Ok(kite_order_id)
     }
 
@@ -471,19 +492,22 @@ impl ZerodhaExecClient {
             .to_string();
 
         // Update the meta cursor + fields. The `kite_order_id` may have changed.
-        let mut map = self.order_meta.write().await;
-        if let Some(meta) = map.get_mut(&client_order_id) {
-            meta.kite_order_id = new_kite_id.clone();
-            if let Some(q) = new_quantity {
-                meta.quantity = q;
-            }
-            if let Some(p) = new_price {
-                meta.price = Some(p);
-            }
-            if let Some(t) = new_trigger_price {
-                meta.trigger_price = Some(t);
+        {
+            let mut map = self.order_meta.write().await;
+            if let Some(meta) = map.get_mut(&client_order_id) {
+                meta.kite_order_id = new_kite_id.clone();
+                if let Some(q) = new_quantity {
+                    meta.quantity = q;
+                }
+                if let Some(p) = new_price {
+                    meta.price = Some(p);
+                }
+                if let Some(t) = new_trigger_price {
+                    meta.trigger_price = Some(t);
+                }
             }
         }
+        self.persist_if_enabled().await;
         Ok(new_kite_id)
     }
 
@@ -616,6 +640,105 @@ impl ZerodhaExecClient {
             ts_init,
             None, // no single base currency
         ))
+    }
+
+    /// Load persisted order metadata from the configured [`crate::persistence::OrderStore`] and
+    /// drive a one-shot startup reconciliation against Kite's `/orders` snapshot
+    /// (spec §5/Phase-7 §1).
+    ///
+    /// Behaviour:
+    ///
+    /// - Every persisted record is rehydrated into the in-memory order-meta map.
+    /// - For each persisted record whose `kite_order_id` appears in the live snapshot we run
+    ///   the normal diff logic and emit a fresh report (the framework's reconciliation
+    ///   manager will replay any missed transitions, e.g. a fill the node missed during
+    ///   downtime).
+    /// - For each persisted record **not** in the snapshot:
+    ///   - If `last_seen_ts` is within the last 24 h → emit a synthetic `OrderCanceled`
+    ///     report and prune from the in-memory map. The framework treats this as a
+    ///     terminal-unknown cancel — strategies can opt into a stricter
+    ///     `/orders/{id}/history` query if they need the exact reason.
+    ///   - Else → prune silently. Kite drops orders from `/orders` after EOD, so a record
+    ///     more than a day old is just a stale row from a previous session.
+    /// - For each snapshot row whose `kite_order_id` we never submitted, the normal
+    ///   external-order path generates a report with `client_order_id = None`.
+    /// - Final state is persisted before returning.
+    ///
+    /// # Errors
+    ///
+    /// HTTP / parse errors from `/orders`, or persistence I/O errors at the final save.
+    pub async fn reconcile_startup(
+        &self,
+        ts_init: UnixNanos,
+    ) -> Result<Vec<OrderStatusReport>> {
+        // Step 1: pull last_seen_ts before we rehydrate (which discards it).
+        let last_seen_map: HashMap<ClientOrderId, u64> = if let Some(store) = &self.store {
+            store
+                .load_raw()
+                .await?
+                .into_iter()
+                .map(|(cid, m)| (cid, m.last_seen_ts))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
+        // Step 2: rehydrate ZerodhaOrderMeta into the in-memory map.
+        if let Some(store) = &self.store {
+            let loaded = store.load().await?;
+            let mut map = self.order_meta.write().await;
+            map.extend(loaded);
+        }
+
+        // Step 3: fetch the live /orders snapshot.
+        let rows: Vec<KiteOrderRow> = self.http.get("/orders").await?;
+        let snapshot_ids: ahash::HashSet<String> =
+            rows.iter().map(|r| r.order_id.clone()).collect();
+
+        // Step 4: build status reports for every snapshot row (known + external).
+        let mut reports: Vec<OrderStatusReport> = Vec::new();
+        {
+            let mut meta_map = self.order_meta.write().await;
+            for row in &rows {
+                if let Some(result) = self.build_report(row, &mut meta_map, ts_init).await
+                    && let Ok(report) = result
+                {
+                    reports.push(report);
+                }
+            }
+        }
+
+        // Step 5: handle persisted records that aren't in the snapshot.
+        let now_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let mut to_prune: Vec<ClientOrderId> = Vec::new();
+        {
+            let meta_map = self.order_meta.read().await;
+            for (cid, meta) in meta_map.iter() {
+                if snapshot_ids.contains(&meta.kite_order_id) {
+                    continue;
+                }
+                let last = last_seen_map.get(cid).copied().unwrap_or(0);
+                let age = now_secs.saturating_sub(last);
+                if age < 86_400 {
+                    // Same-day miss — synthesize a terminal Canceled report so the framework
+                    // can transition the order out of the live cache.
+                    reports.push(synthesise_cancel_report(meta, self.account_id, ts_init));
+                }
+                to_prune.push(*cid);
+            }
+        }
+        if !to_prune.is_empty() {
+            let mut meta_map = self.order_meta.write().await;
+            for cid in to_prune {
+                meta_map.remove(&cid);
+            }
+        }
+
+        // Step 6: persist final state so we never re-emit the synthetic cancel.
+        self.persist_if_enabled().await;
+        Ok(reports)
     }
 
     /// Poll `/orders` and emit one [`OrderStatusReport`] per row whose `(status, filled_qty,
@@ -814,6 +937,33 @@ pub fn tag_is_ours(tag: &str) -> bool {
     tag.starts_with("NTLZ")
 }
 
+/// Build a synthetic OrderCanceled-equivalent status report for a persisted order that no
+/// longer appears in Kite's `/orders` snapshot. Used by [`ZerodhaExecClient::reconcile_startup`]
+/// to bring the framework's cache into terminal state for same-day misses.
+fn synthesise_cancel_report(
+    meta: &ZerodhaOrderMeta,
+    account_id: AccountId,
+    ts_init: UnixNanos,
+) -> OrderStatusReport {
+    let filled_qty = Quantity::new(meta.last_filled_qty, 0);
+    OrderStatusReport::new(
+        account_id,
+        meta.instrument_id,
+        Some(meta.client_order_id),
+        VenueOrderId::from(meta.kite_order_id.as_str()),
+        meta.order_side,
+        meta.order_type,
+        meta.time_in_force,
+        OrderStatus::Canceled,
+        meta.quantity,
+        filled_qty,
+        ts_init,
+        ts_init,
+        ts_init,
+        Some(UUID4::new()),
+    )
+}
+
 fn validate_submit(req: &SubmitRequest) -> Result<()> {
     if req.quantity.as_f64() <= 0.0 {
         return Err(anyhow!("quantity must be positive"));
@@ -993,6 +1143,36 @@ mod tests {
     }
 
     #[rstest]
+    fn synthesise_cancel_yields_terminal_status() {
+        let meta = ZerodhaOrderMeta {
+            client_order_id: ClientOrderId::from("X-1"),
+            kite_order_id: "250520000000001".into(),
+            variety: KiteVariety::Regular,
+            product: KiteProduct::Mis,
+            instrument_id: nautilus_model::identifiers::InstrumentId::from("RELIANCE-EQ.NSE"),
+            order_side: OrderSide::Buy,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::Day,
+            quantity: Quantity::new(5.0, 0),
+            price: Some(Price::new(1327.4, 1)),
+            trigger_price: None,
+            last_status: OrderStatus::Accepted,
+            last_filled_qty: 0.0,
+            last_avg_px: None,
+        };
+        let acc = AccountId::from("ZERODHA-TEST");
+        let report = synthesise_cancel_report(
+            &meta,
+            acc,
+            UnixNanos::from(1_700_000_000_000_000_000u64),
+        );
+        assert_eq!(report.order_status, OrderStatus::Canceled);
+        assert_eq!(report.client_order_id, Some(meta.client_order_id));
+        assert_eq!(report.account_id, acc);
+        assert_eq!(report.quantity, meta.quantity);
+    }
+
+    #[rstest]
     fn modify_requires_at_least_one_field() {
         // Verifies the up-front guard inside `modify_order`. We can't easily exercise the full
         // HTTP path in a unit test (no mock server here), but we can prove the guard fires.
@@ -1006,7 +1186,7 @@ mod tests {
         let session = Arc::new(ZerodhaSessionManager::new("k".into(), "t".into(), None));
         let http = Arc::new(ZerodhaHttpClient::new(session, None).unwrap());
         let cache = Arc::new(ZerodhaInstrumentCache::new());
-        let client = ZerodhaExecClient::new(http, cache, AccountId::from("ZERODHA-TEST"));
+        let client = ZerodhaExecClient::new(http, cache, AccountId::from("ZERODHA-TEST"), None);
 
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             // No meta -> error before the all-fields-None check, but we also assert the
