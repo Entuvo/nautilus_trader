@@ -1,0 +1,120 @@
+[package]
+name = "nautilus-zerodha"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Zerodha (Kite Connect) integration adapter for the Nautilus trading engine"
+categories.workspace = true
+keywords.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "nautilus_zerodha"
+crate-type = ["rlib"]
+
+[features]
+default = ["live", "high-precision"]
+extension-module = [
+  "nautilus-core/extension-module",
+  "nautilus-live?/extension-module",
+  "nautilus-model/extension-module",
+  "python",
+  "pyo3/extension-module",
+]
+live = ["nautilus-live", "nautilus-live/node", "nautilus-system"]
+python = [
+  "live",
+  "nautilus-core/ffi",
+  "nautilus-core/python",
+  "nautilus-live/python",
+  "nautilus-model/ffi",
+  "nautilus-model/python",
+  "nautilus-system/python",
+  "pyo3",
+  "pyo3-async-runtimes",
+  "pyo3-stub-gen",
+]
+high-precision = ["nautilus-model/high-precision"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+nautilus-common = { workspace = true, features = ["live"] }
+nautilus-core = { workspace = true }
+nautilus-cryptography = { workspace = true }
+nautilus-live = { workspace = true, optional = true }
+nautilus-model = { workspace = true }
+nautilus-network = { workspace = true }
+nautilus-system = { workspace = true, optional = true }
+
+ahash = { workspace = true }
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+bon = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+csv = { workspace = true }
+futures-util = { workspace = true }
+hex = "0.4"
+indexmap = { workspace = true }
+log = { workspace = true }
+reqwest = { workspace = true, features = ["form"] }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+strum = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tokio-util = { workspace = true }
+url = { workspace = true }
+ustr = { workspace = true }
+zeroize = { workspace = true }
+
+pyo3 = { workspace = true, optional = true }
+pyo3-async-runtimes = { workspace = true, optional = true }
+pyo3-stub-gen = { workspace = true, optional = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true, features = ["form"] }
+criterion = { workspace = true }
+env_logger = "0.11"
+rstest = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[[bench]]
+name = "decode_bench"
+harness = false
+
+[[example]]
+name = "zerodha-smoke-connect"
+path = "examples/smoke_connect.rs"
+required-features = ["live"]
+doc = false
+
+[[example]]
+name = "zerodha-ws-capture"
+path = "examples/ws_capture.rs"
+required-features = ["live"]
+doc = false
+
+[[example]]
+name = "zerodha-exec-smoke"
+path = "examples/exec_smoke.rs"
+required-features = ["live"]
+doc = false

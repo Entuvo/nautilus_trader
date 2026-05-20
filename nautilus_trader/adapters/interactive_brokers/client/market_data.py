@@ -68,6 +68,29 @@ MAX_VALID_TICK_SIZE = Decimal("1e12")
 # Subscription type identifier for index market data (reqMktData for indices)
 INDEX_MARKET_DATA = "index_market_data"
 
+# IB delivers DELAYED_* tick types (IDs 66-76) when market_data_type=3 or 4
+# instead of LIVE tick types (IDs 0-4). The quote-tick assembly path keys
+# off LIVE IDs; normalize delayed→live at storage time so accounts without a
+# real-time market data subscription still produce QuoteTicks.
+#
+# Refs: TickType IDs in ibapi.ticktype.TickTypeEnum
+#   1=BID, 2=ASK, 4=LAST            → live prices
+#   0=BID_SIZE, 3=ASK_SIZE, 5=LAST_SIZE, 8=VOLUME  → live sizes
+#   66=DELAYED_BID, 67=DELAYED_ASK, 68=DELAYED_LAST
+#   69=DELAYED_BID_SIZE, 70=DELAYED_ASK_SIZE, 71=DELAYED_LAST_SIZE,
+#   74=DELAYED_VOLUME
+_DELAYED_TO_LIVE_PRICE: dict[int, int] = {
+    66: 1,  # DELAYED_BID  → BID
+    67: 2,  # DELAYED_ASK  → ASK
+    68: 4,  # DELAYED_LAST → LAST
+}
+_DELAYED_TO_LIVE_SIZE: dict[int, int] = {
+    69: 0,  # DELAYED_BID_SIZE  → BID_SIZE
+    70: 3,  # DELAYED_ASK_SIZE  → ASK_SIZE
+    71: 5,  # DELAYED_LAST_SIZE → LAST_SIZE
+    74: 8,  # DELAYED_VOLUME    → VOLUME
+}
+
 
 class InteractiveBrokersClientMarketDataMixin(BaseMixin):
     """
@@ -891,7 +914,11 @@ class InteractiveBrokersClientMarketDataMixin(BaseMixin):
             return
 
         # IB tick types: 0=BID_SIZE, 1=BID_PRICE, 2=ASK_PRICE, 3=ASK_SIZE, 4=LAST_PRICE
-        self._subscription_tick_data[req_id][tick_type] = price
+        # Delayed equivalents: 66=DELAYED_BID, 67=DELAYED_ASK, 68=DELAYED_LAST.
+        # Normalize delayed to live so _try_create_quote_tick_from_market_data
+        # finds them under the keys it expects when market_data_type=3 or 4.
+        normalized_type = _DELAYED_TO_LIVE_PRICE.get(tick_type, tick_type)
+        self._subscription_tick_data[req_id][normalized_type] = price
 
         if subscription.name[1] == INDEX_MARKET_DATA:
             # Create an index price tick
@@ -928,7 +955,11 @@ class InteractiveBrokersClientMarketDataMixin(BaseMixin):
             self._subscription_tick_data[req_id] = {}
 
         # IB tick types: 0=BID_SIZE, 1=BID_PRICE, 2=ASK_PRICE, 3=ASK_SIZE
-        self._subscription_tick_data[req_id][tick_type] = int(size)
+        # Delayed equivalents: 69=DELAYED_BID_SIZE, 70=DELAYED_ASK_SIZE,
+        # 71=DELAYED_LAST_SIZE, 74=DELAYED_VOLUME. Normalize so the live
+        # quote-tick assembly path picks them up under the expected keys.
+        normalized_type = _DELAYED_TO_LIVE_SIZE.get(tick_type, tick_type)
+        self._subscription_tick_data[req_id][normalized_type] = int(size)
 
         # Check if we have both bid and ask data to create a quote tick
         await self._try_create_quote_tick_from_market_data(subscription, req_id)
