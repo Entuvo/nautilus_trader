@@ -98,3 +98,9 @@ name = "zerodha-smoke-connect"
 path = "examples/smoke_connect.rs"
 required-features = ["live"]
 doc = false
+
+[[example]]
+name = "zerodha-ws-capture"
+path = "examples/ws_capture.rs"
+required-features = ["live"]
+doc = false
