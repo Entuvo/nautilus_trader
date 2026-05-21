@@ -13,12 +13,11 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
-from unittest.mock import MagicMock
-
 import pytest
 
 from nautilus_trader.adapters.thetadata.config import ThetaDataDataClientConfig
 from nautilus_trader.adapters.thetadata.data import ThetaDataDataClient
+from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.data.messages import SubscribeQuoteTicks
 from nautilus_trader.data.messages import UnsubscribeQuoteTicks
 
@@ -105,6 +104,41 @@ class TestThetaDataDataClient:
         mock_instrument_provider,
         option_instrument_id,
     ) -> None:
+        # `Cache` is a Cython type whose methods are read-only and the constructor
+        # rejects MagicMock substitutes. Pre-populate the real cache with an
+        # OptionContract matching `option_instrument_id` so the subscribe path's
+        # cache lookup returns price/size precisions naturally.
+        import pandas as pd
+        import pytz
+
+        from nautilus_trader.model.currencies import USD
+        from nautilus_trader.model.enums import AssetClass
+        from nautilus_trader.model.enums import OptionKind
+        from nautilus_trader.model.instruments import OptionContract
+        from nautilus_trader.model.objects import Price
+        from nautilus_trader.model.objects import Quantity
+
+        cache.add_instrument(
+            OptionContract(
+                instrument_id=option_instrument_id,
+                raw_symbol=option_instrument_id.symbol,
+                asset_class=AssetClass.INDEX,
+                exchange="CBOE",
+                currency=USD,
+                price_precision=2,
+                price_increment=Price.from_str("0.01"),
+                multiplier=Quantity.from_int(100),
+                lot_size=Quantity.from_int(1),
+                underlying="SPXW",
+                option_kind=OptionKind.CALL,
+                strike_price=Price.from_str("480.00"),
+                activation_ns=pd.Timestamp("2025-03-01", tz=pytz.utc).value,
+                expiration_ns=pd.Timestamp("2025-03-15", tz=pytz.utc).value,
+                ts_event=0,
+                ts_init=0,
+            ),
+        )
+
         client = _make_data_client(
             event_loop,
             msgbus,
@@ -115,18 +149,11 @@ class TestThetaDataDataClient:
             mock_instrument_provider,
         )
 
-        # Stub instrument cache lookup so the subscribe path finds price precisions.
-        fake_instrument = MagicMock()
-        fake_instrument.price_precision = 2
-        fake_instrument.size_precision = 0
-        cache.add_instrument = MagicMock()
-        cache.instrument = MagicMock(return_value=fake_instrument)
-
         command = SubscribeQuoteTicks(
             instrument_id=option_instrument_id,
             client_id=client.id,
             venue=option_instrument_id.venue,
-            command_id=client._generate_uuid_id() if hasattr(client, "_generate_uuid_id") else None,
+            command_id=UUID4(),
             ts_init=0,
             params=None,
         )
@@ -161,7 +188,7 @@ class TestThetaDataDataClient:
             instrument_id=option_instrument_id,
             client_id=client.id,
             venue=option_instrument_id.venue,
-            command_id=client._generate_uuid_id() if hasattr(client, "_generate_uuid_id") else None,
+            command_id=UUID4(),
             ts_init=0,
             params=None,
         )

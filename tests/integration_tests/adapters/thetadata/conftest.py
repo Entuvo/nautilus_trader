@@ -31,6 +31,35 @@ def venue() -> Venue:
     return THETADATA_VENUE
 
 
+# Override the NotImplementedError stubs in the parent adapters conftest. The shared
+# autouse `trader` fixture pulls these in for every test in the tree; returning None
+# matches the shape used by zerodha/binance conftests for adapters that don't yet
+# wire a full instrument round-trip into the trader stub.
+@pytest.fixture
+def instrument():
+    return None
+
+
+@pytest.fixture
+def instrument_provider():
+    return None
+
+
+@pytest.fixture
+def data_client():
+    return None
+
+
+@pytest.fixture
+def exec_client():
+    return None
+
+
+@pytest.fixture
+def account_state():
+    return None
+
+
 @pytest.fixture
 def option_instrument_id() -> InstrumentId:
     """
