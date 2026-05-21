@@ -38,7 +38,7 @@ class TestThetaDataInstrumentProvider:
         assert instrument is not None
         assert instrument.id == option_instrument_id
         assert instrument.option_kind == OptionKind.CALL
-        assert instrument.underlying.value == "SPXW"
+        assert instrument.underlying == "SPXW"
         assert str(instrument.strike_price) == "480.00"
         assert instrument.multiplier.as_decimal() == 100
 
