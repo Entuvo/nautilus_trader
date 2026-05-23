@@ -1,0 +1,11 @@
+{
+  "description": "DST fall-back 2025-11-02: 1:00-2:00 AM ET is ambiguous. Range [3600000, 7200000).",
+  "date": 20251102,
+  "ambiguous_ms_of_day": [
+    3600000,
+    5400000,
+    7199999
+  ],
+  "fold_0_utc_nanos": null,
+  "fold_1_utc_nanos": null
+}

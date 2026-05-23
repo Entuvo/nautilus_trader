@@ -1,0 +1,16 @@
+{
+  "description": "DST spring-forward 2025-03-09: 2:00-3:00 AM ET does not exist. Gap is [7200000, 10800000).",
+  "date": 20250309,
+  "non_existent_ms_of_day": [
+    7200000,
+    7500000,
+    9000000,
+    9540000,
+    10799999
+  ],
+  "valid_ms_of_day": [
+    7199999,
+    10800000,
+    43200000
+  ]
+}
