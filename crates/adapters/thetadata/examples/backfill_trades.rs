@@ -13,8 +13,8 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! 30-day tick-trade backfill for SPY + SPX + SPXW, ATM ± 20 strikes, writing directly to
-//! a Nautilus `ParquetDataCatalog`.
+//! Tick-trade backfill for SPX + SPXW, ATM ± 20 strikes, writing directly to a Nautilus
+//! `ParquetDataCatalog`. Lookback window controlled by `THETADATA_DAYS_BACK` (default 30).
 //!
 //! Output layout (canonical Nautilus catalog format):
 //!
@@ -55,7 +55,6 @@ use nautilus_thetadata::{
 use tokio::sync::Semaphore;
 
 const ROOTS: &[Root] = &[
-    Root { ticker: "SPY", kind: UnderlyingKind::Stock },
     Root { ticker: "SPX", kind: UnderlyingKind::Index },
     Root { ticker: "SPXW", kind: UnderlyingKind::Index },
 ];

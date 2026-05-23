@@ -57,11 +57,12 @@ The `tier` config knob drives client-side stream-count enforcement.
 
 ## Examples
 
-| Example | Purpose |
-|---|---|
-| `thetadata-data-tester` | Live `LiveNode` smoke test — subscribes to quote+trade streams |
-| `thetadata-hist-tester` | One-day historical-quote pull validating the REST → decode path |
-| `thetadata-backfill-trades` | Multi-day catalog backfill (SPY/SPX/SPXW, ATM ± 20 strikes) |
+| Example | Language | Purpose |
+|---|---|---|
+| `thetadata-data-tester` | Rust | Live `LiveNode` smoke test — subscribes to quote+trade streams |
+| `thetadata-hist-tester` | Rust | One-day historical-quote pull validating the REST → decode path |
+| `thetadata-backfill-trades` | Rust | Multi-day catalog backfill (SPX/SPXW, ATM ± 20 strikes) |
+| `examples/sandbox/thetadata_backfill_trades.py` | Python | Same backfill as above via the `nautilus_pyo3.ThetaDataHttpClient` surface |
 
 ```bash
 # Live (requires market hours and Standard+ subscription):
@@ -69,9 +70,14 @@ java -jar ~/thetadata/ThetaTerminalv3.jar &
 THETADATA_INSTRUMENT_ID="SPXW260520C07400000.THETADATA" \
   cargo run --release --example thetadata-data-tester -p nautilus-thetadata
 
-# 30-day catalog backfill (writes per-instrument Parquet under ./data/thetadata-catalog):
+# 30-day catalog backfill — Rust (writes per-instrument Parquet under ./data/thetadata-catalog):
 THETADATA_DAYS_BACK=30 THETADATA_CATALOG_DIR=./data/thetadata-catalog \
   cargo run --release --example thetadata-backfill-trades -p nautilus-thetadata
+
+# 30-day catalog backfill — Python (must be invoked as `-m` from the project root so the
+# editable dev tree wins over any site-packages copy of `nautilus_trader`):
+THETADATA_DAYS_BACK=30 THETADATA_CATALOG_DIR=./data/thetadata-catalog THETADATA_CONCURRENCY=4 \
+  python -u -m examples.sandbox.thetadata_backfill_trades
 ```
 
 ## Entry points (all live-verified or test-covered)

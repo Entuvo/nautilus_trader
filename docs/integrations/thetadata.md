@@ -154,13 +154,17 @@ serializable through `ImportableConfig`.
 The crate ships three runnable examples under
 `crates/adapters/thetadata/examples/`:
 
-| Example | Purpose | Tier needed |
-|---|---|---|
-| `thetadata-hist-tester` | One-day historical quote pull, validates decode pipeline | Value+ |
-| `thetadata-backfill-trades` | Multi-day catalog backfill for SPY/SPX/SPXW (ATM ± 20 strikes) | Standard+ |
-| `thetadata-data-tester` | Live `LiveNode` smoke test, subscribes to quote+trade streams | Standard+ |
+| Example | Language | Purpose | Tier needed |
+|---|---|---|---|
+| `thetadata-hist-tester` | Rust | One-day historical quote pull, validates decode pipeline | Value+ |
+| `thetadata-backfill-trades` | Rust | Multi-day catalog backfill for SPX/SPXW (ATM ± 20 strikes) | Standard+ |
+| `thetadata-data-tester` | Rust | Live `LiveNode` smoke test, subscribes to quote+trade streams | Standard+ |
+| `examples/sandbox/thetadata_backfill_trades.py` | Python | Same SPX/SPXW backfill via the `nautilus_pyo3.ThetaDataHttpClient` surface | Standard+ |
 
-Run with `cargo run --release --example <name> -p nautilus-thetadata`.
+Run Rust examples with `cargo run --release --example <name> -p nautilus-thetadata`.
+Run the Python backfill from the project root via `python -u -m examples.sandbox.thetadata_backfill_trades`
+(direct script invocation puts `examples/sandbox/` on `sys.path[0]`, which lets any
+older site-packages `nautilus_trader` shadow the local dev tree).
 Override the target instrument with `THETADATA_INSTRUMENT_ID="SPXW260520C07400000.THETADATA"`.
 
 ## Symbology
@@ -245,22 +249,47 @@ The adapter targets the following subset of the data-conformance matrix
 
 ## Backfill the catalog
 
-The backfill example writes directly to a Nautilus `ParquetDataCatalog`:
+Both backfill scripts (Rust and Python) write directly to a Nautilus
+`ParquetDataCatalog` using the same env-var contract:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `THETADATA_CATALOG_DIR` | `./data/thetadata-catalog` | Catalog root directory |
+| `THETADATA_DAYS_BACK` | `30` | Lookback window in calendar days (weekends auto-skipped) |
+| `THETADATA_CONCURRENCY` | `4` | Max in-flight `hist_trades` requests (≤ Standard tier limit) |
+| `THETADATA_HTTP_URL` | `http://127.0.0.1:25503/v3` | ThetaTerminal v3 endpoint |
+
+Pick the language that matches your control surface:
 
 ```bash
-# Capture 30 days of trade ticks for SPY/SPX/SPXW (ATM ± 20 strikes):
+# Rust — fastest single-thread throughput; recommended for the initial bulk pull.
 THETADATA_DAYS_BACK=30 \
 THETADATA_CATALOG_DIR=./data/thetadata-catalog \
 cargo run --release --example thetadata-backfill-trades -p nautilus-thetadata
+
+# Python — same algorithm, same output, callable from a Python orchestrator. Must be
+# invoked as `-m` from the project root; direct script invocation puts the script's
+# directory on `sys.path[0]` and lets a site-packages `nautilus_trader` shadow the
+# dev tree (which then won't have the thetadata adapter and the import will fail).
+THETADATA_DAYS_BACK=30 \
+THETADATA_CATALOG_DIR=./data/thetadata-catalog \
+THETADATA_CONCURRENCY=4 \
+python -u -m examples.sandbox.thetadata_backfill_trades
 ```
+
+Both scripts pin `ts_init = ts_event` on every tick so a re-run produces byte-identical
+parquet files. Neither is idempotent in the skip-existing sense — re-running rewrites
+the (instrument, day) parquet files in place. Wall-clock for the Python path on
+Standard tier at `THETADATA_CONCURRENCY=4` is ~60–90s per trading day for SPX + SPXW
+combined; expect 8–12 hours and 25–50 GB on disk for a 365-day pull.
 
 The resulting catalog uses the canonical Nautilus layout:
 
 ```text
 ./data/thetadata-catalog/
-└── data/trades/
-    ├── SPY260626P00750000.THETADATA/2026-05-15T13-30-00Z_2026-05-15T19-59-51Z.parquet
-    ├── SPXW260604P07360000.THETADATA/...
+└── data/trade_tick/
+    ├── SPXW260604P07360000.THETADATA/2026-05-15T13-30-00Z_2026-05-15T19-59-51Z.parquet
+    ├── SPX260618C04800000.THETADATA/...
     └── ...
 ```
 
@@ -271,7 +300,7 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 cat = ParquetDataCatalog("./data/thetadata-catalog")
 cat.list_instruments("trade_tick")
-# → ['SPY260522C00740000.THETADATA', ...]
+# → ['SPXW260522C07400000.THETADATA', ...]
 ```
 
 ## Troubleshooting
