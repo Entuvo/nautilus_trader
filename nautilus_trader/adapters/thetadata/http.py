@@ -1,11 +1,12 @@
 """
 ThetaData HTTP client — REST historical + listing endpoints via the local
-ThetaTerminal proxy (default port 25510).
+ThetaTerminal v3 proxy (default port 25503).
 
 Wire format reference: docs/architecture/notes/thetadata-wire-format.md.
-Responses follow the `{header, response}` envelope; `response` is a list of
-positional-aligned arrays for historical endpoints, or a list of scalars/tuples
-for listing endpoints.
+v3 envelope is `{"response": [...]}` (no `header` field). Historical
+endpoints return per-contract `{contract, data}` pairs; listing endpoints
+return flat lists of named-field objects. All endpoints require
+`format=json` (default is CSV).
 """
 
 from __future__ import annotations
@@ -26,7 +27,8 @@ from tenacity import (
 from nautilus_trader.adapters.thetadata.config import ThetaDataDataClientConfig
 
 
-# 30-day historical chunk limit (per wire-format doc § "30-Day Chunk Limit").
+# 30-day chunk limit not explicitly documented in v3, but free/value tier
+# enforcement makes splitting a defensive necessity.
 _CHUNK_DAYS = 30
 
 
@@ -71,17 +73,25 @@ def _chunk_date_range(start: int, end: int, chunk_days: int = _CHUNK_DAYS) -> li
     return chunks
 
 
-class ThetaDataHttpClient:
-    """Async HTTP client for the local ThetaTerminal REST proxy.
+def _right_to_wire(right: str) -> str:
+    """OCC right ('C'/'P') → v3 REST request value ('call'/'put')."""
+    r = right.upper()
+    if r == "C":
+        return "call"
+    if r == "P":
+        return "put"
+    raise ValueError(f"Invalid right: {right!r}")
 
-    - Per-process aiohttp session with bounded connection pool (limit=20 covers
-      parallel `load_ids_async` with headroom; ThetaTerminal-on-localhost
-      doesn't need the aiohttp default of 100).
+
+class ThetaDataHttpClient:
+    """Async HTTP client for the local ThetaTerminal v3 REST proxy.
+
+    - Per-process aiohttp session with bounded connection pool (limit=20).
     - Token-bucket rate limiter (`aiolimiter`) — default 5 req/s.
     - Exponential+jitter retry on 5xx/429/transport errors. 4xx propagates.
     - 30-day chunk splitter for historical date ranges; chunk results concat
-      in arrival order. A failed chunk after retries propagates — no partial
-      returns (avoids silent gaps).
+      in arrival order. A failed chunk propagates after retries (no partial
+      returns — avoids silent gaps).
     """
 
     def __init__(self, config: ThetaDataDataClientConfig):
@@ -114,7 +124,10 @@ class ThetaDataHttpClient:
         await self.close()
 
     async def _get_envelope(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
-        """GET a JSON envelope, retrying retryable failures and rate-limiting all calls."""
+        """GET a v3 JSON envelope, retrying retryable failures and rate-limiting."""
+        # Default response is CSV; force JSON.
+        if "format" not in params:
+            params = {**params, "format": "json"}
         session = await self._ensure_session()
         url = f"{self._http_url}{path}"
 
@@ -130,72 +143,130 @@ class ThetaDataHttpClient:
                         if resp.status >= 400:
                             text = (await resp.text())[:512]
                             raise ThetaDataHttpError(resp.status, text, url)
-                        return await resp.json()
+                        body = await resp.text()
+                        # v3 returns plain text for tier/auth errors with a 200 status.
+                        # Detect: real envelope starts with '{', error text doesn't.
+                        stripped = body.lstrip()
+                        if not stripped.startswith("{"):
+                            raise ThetaDataHttpError(
+                                status=resp.status,
+                                message=body[:512],
+                                url=url,
+                            )
+                        # parse JSON
+                        import json
+                        return json.loads(body)
 
         raise RuntimeError("unreachable")  # tenacity reraise=True covers this
 
     @staticmethod
     def _envelope_rows(envelope: dict[str, Any]) -> list:
-        """Extract `response` from the envelope, raising on `header.error_type`."""
-        header = envelope.get("header") or {}
-        err = header.get("error_type")
-        if err:
-            raise ThetaDataHttpError(
-                status=header.get("error_code", 500),
-                message=f"{err}: {header.get('error_message', '')}",
-                url="<envelope>",
-            )
         return envelope.get("response") or []
 
     # -----------------------------------------------------------------------
-    # Historical endpoints — all chunked by 30 days
+    # Listing endpoints
     # -----------------------------------------------------------------------
 
-    async def _hist(self, path: str, root: str, start: int, end: int, **extra) -> list[list]:
-        """Internal: chunked historical GET. Concatenates rows in order."""
-        out: list[list] = []
+    async def list_stock_symbols(self) -> list[str]:
+        env = await self._get_envelope("/v3/stock/list/symbols", {})
+        return [r["symbol"] for r in self._envelope_rows(env)]
+
+    async def list_expirations(self, symbol: str) -> list[date]:
+        """GET /v3/option/list/expirations — returns expiration dates."""
+        env = await self._get_envelope("/v3/option/list/expirations", {"symbol": symbol})
+        rows = self._envelope_rows(env)
+        return [date.fromisoformat(r["expiration"]) for r in rows]
+
+    async def list_strikes(self, symbol: str, expiration: date) -> list[Decimal]:
+        """GET /v3/option/list/strikes — strikes in dollars (already)."""
+        env = await self._get_envelope(
+            "/v3/option/list/strikes",
+            {"symbol": symbol, "expiration": expiration.isoformat()},
+        )
+        return [Decimal(str(r["strike"])) for r in self._envelope_rows(env)]
+
+    # -----------------------------------------------------------------------
+    # Option historical — chunked by 30 days
+    # -----------------------------------------------------------------------
+
+    async def _option_hist(
+        self,
+        path: str,
+        symbol: str,
+        expiration: date,
+        strike: Decimal | float | str,
+        right: str,
+        start: int,
+        end: int,
+        interval: str = "1m",
+    ) -> list[dict]:
+        """Internal: chunked option historical GET.
+
+        Returns a flat list of `data` rows across all returned contracts. When
+        the v3 response wraps each contract in `{contract, data}`, this
+        flattens to `data` rows only — callers that need the contract metadata
+        per row should not use this method (none in the adapter today).
+        """
+        out: list[dict] = []
         for chunk_start, chunk_end in _chunk_date_range(start, end):
-            params = {
-                "root": root,
+            params: dict[str, Any] = {
+                "symbol": symbol,
+                "expiration": expiration.isoformat(),
+                "strike": str(strike) if not isinstance(strike, str) else strike,
+                "right": _right_to_wire(right) if right not in ("call", "put", "both") else right,
                 "start_date": str(chunk_start),
                 "end_date": str(chunk_end),
-                **extra,
+                "interval": interval,
             }
             envelope = await self._get_envelope(path, params)
-            out.extend(self._envelope_rows(envelope))
+            for contract_block in self._envelope_rows(envelope):
+                # `response` is either a list of {contract, data} blocks (when
+                # multiple contracts match) or a single object — normalize.
+                if isinstance(contract_block, dict) and "data" in contract_block:
+                    out.extend(contract_block["data"])
+                else:
+                    # Some endpoints return rows directly under response.
+                    out.append(contract_block)
         return out
 
-    async def hist_quotes(self, root: str, start: int, end: int) -> list[list]:
-        """GET /v2/hist/stock/quote, chunked. Returns positional row arrays."""
-        return await self._hist("/v2/hist/stock/quote", root, start, end)
-
-    async def hist_trades(self, root: str, start: int, end: int) -> list[list]:
-        """GET /v2/hist/stock/trade, chunked."""
-        return await self._hist("/v2/hist/stock/trade", root, start, end)
-
-    async def hist_ohlc(self, root: str, start: int, end: int, ivl_ms: int = 60000) -> list[list]:
-        """GET /v2/hist/stock/ohlc, chunked. `ivl_ms` = candle duration in ms."""
-        return await self._hist("/v2/hist/stock/ohlc", root, start, end, ivl=str(ivl_ms))
-
-    # -----------------------------------------------------------------------
-    # Listing endpoints — not chunked
-    # -----------------------------------------------------------------------
-
-    async def list_expirations(self, root: str) -> list[int]:
-        """GET /v2/list/expirations?root=...  → list of YYYYMMDD ints."""
-        env = await self._get_envelope("/v2/list/expirations", {"root": root})
-        return [int(d) for d in self._envelope_rows(env)]
-
-    async def list_strikes(self, root: str, expiration: int) -> list[Decimal]:
-        """GET /v2/list/strikes?root=...&exp=...  → strikes in dollars (decoded from 1/10¢)."""
-        env = await self._get_envelope("/v2/list/strikes", {"root": root, "exp": str(expiration)})
-        # Wire: strike in 1/10th of a cent (per wire-format doc).
-        return [Decimal(int(s)) / Decimal(10000) for s in self._envelope_rows(env)]
-
-    async def list_contracts(self, root: str, start_date: int) -> list[tuple]:
-        """GET /v2/list/contracts/option/trade — `[root, expiration, strike(1/10¢), right]`."""
-        env = await self._get_envelope(
-            "/v2/list/contracts/option/trade",
-            {"root": root, "start_date": str(start_date)},
+    async def option_hist_quotes(
+        self,
+        symbol: str,
+        expiration: date,
+        strike: Decimal | float,
+        right: str,
+        start: int,
+        end: int,
+        interval: str = "1m",
+    ) -> list[dict]:
+        return await self._option_hist(
+            "/v3/option/history/quote", symbol, expiration, strike, right, start, end, interval,
         )
-        return [tuple(row) for row in self._envelope_rows(env)]
+
+    async def option_hist_trades(
+        self,
+        symbol: str,
+        expiration: date,
+        strike: Decimal | float,
+        right: str,
+        start: int,
+        end: int,
+        interval: str = "tick",
+    ) -> list[dict]:
+        return await self._option_hist(
+            "/v3/option/history/trade", symbol, expiration, strike, right, start, end, interval,
+        )
+
+    async def option_hist_ohlc(
+        self,
+        symbol: str,
+        expiration: date,
+        strike: Decimal | float,
+        right: str,
+        start: int,
+        end: int,
+        interval: str = "1m",
+    ) -> list[dict]:
+        return await self._option_hist(
+            "/v3/option/history/ohlc", symbol, expiration, strike, right, start, end, interval,
+        )

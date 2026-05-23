@@ -37,9 +37,9 @@ def _build_client(ws_client=None, http_client=None, instrument_ids=None):
     cache = Cache()
     http_client = http_client or MagicMock()
     http_client.close = AsyncMock()
-    http_client.hist_quotes = AsyncMock(return_value=[])
-    http_client.hist_trades = AsyncMock(return_value=[])
-    http_client.hist_ohlc = AsyncMock(return_value=[])
+    http_client.option_hist_quotes = AsyncMock(return_value=[])
+    http_client.option_hist_trades = AsyncMock(return_value=[])
+    http_client.option_hist_ohlc = AsyncMock(return_value=[])
 
     ws_client = ws_client or MagicMock()
     ws_client.connect = AsyncMock()
@@ -140,17 +140,24 @@ class TestRequestPaths:
     @pytest.mark.asyncio
     async def test_request_quote_ticks_decodes_rows(self):
         client, _ws, http_client, *_ = _build_client()
-        http_client.hist_quotes = AsyncMock(
-            return_value=[[35100000, 38, 69, 5.4, 50, 21, 69, 5.6, 50, 20231103]]
-        )
+        http_client.option_hist_quotes = AsyncMock(return_value=[
+            {"timestamp": "2024-06-20T09:30:01.000",
+             "bid_size": 5, "bid": 39.00, "ask_size": 1, "ask": 39.70}
+        ])
         req = MagicMock()
         req.instrument_id = _INSTRUMENT_ID
-        req.start = datetime(2023, 11, 3, tzinfo=timezone.utc)
-        req.end = datetime(2023, 11, 3, tzinfo=timezone.utc)
+        req.start = datetime(2024, 6, 20, tzinfo=timezone.utc)
+        req.end = datetime(2024, 6, 20, tzinfo=timezone.utc)
         req.correlation_id = UUID4()
         req.params = None
         await client._request_quote_ticks(req)
-        http_client.hist_quotes.assert_awaited_once_with("AAPL", 20231103, 20231103)
+        # Verify call signature uses v3 client method with parsed OCC.
+        http_client.option_hist_quotes.assert_awaited_once()
+        _, kwargs = http_client.option_hist_quotes.call_args
+        assert kwargs["symbol"] == "AAPL"
+        assert kwargs["right"] == "C"
+        assert kwargs["start"] == 20240620
+        assert kwargs["end"] == 20240620
 
 
 class TestBarValidation:
@@ -178,19 +185,21 @@ class TestBarValidation:
     async def test_request_bars_minute_succeeds(self):
         client, _ws, http_client, *_ = _build_client()
         # Option prices: 2 decimal precision (matches OptionContract default).
-        http_client.hist_ohlc = AsyncMock(
-            return_value=[[45000000, 1.86, 1.95, 1.80, 1.90, 87758, 1319, 20240102]]
-        )
+        http_client.option_hist_ohlc = AsyncMock(return_value=[
+            {"timestamp": "2024-06-20T09:30:00.000",
+             "open": 1.86, "high": 1.95, "low": 1.80, "close": 1.90,
+             "volume": 87758, "vwap": 1.88, "count": 1319}
+        ])
         spec = BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST)
         bar_type = BarType(_INSTRUMENT_ID, spec)
         req = MagicMock()
         req.bar_type = bar_type
-        req.start = datetime(2024, 1, 2, tzinfo=timezone.utc)
-        req.end = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        req.start = datetime(2024, 6, 20, tzinfo=timezone.utc)
+        req.end = datetime(2024, 6, 20, tzinfo=timezone.utc)
         req.correlation_id = UUID4()
         req.params = None
         await client._request_bars(req)
-        http_client.hist_ohlc.assert_awaited_once()
-        # ivl_ms = 60_000 * step (1)
-        _, kwargs = http_client.hist_ohlc.call_args
-        assert kwargs.get("ivl_ms") == 60_000
+        http_client.option_hist_ohlc.assert_awaited_once()
+        _, kwargs = http_client.option_hist_ohlc.call_args
+        assert kwargs["interval"] == "1m"
+        assert kwargs["symbol"] == "AAPL"

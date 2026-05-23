@@ -40,7 +40,7 @@ from nautilus_trader.model.enums import BarAggregation, PriceType
 from nautilus_trader.model.identifiers import ClientId, InstrumentId
 
 
-# Supported bar aggregations for ThetaData /v2/hist/stock/ohlc (ivl_ms).
+# Supported bar aggregations for ThetaData /v3/option/history/ohlc (ivl ms).
 _BAR_IVL_MS: dict[BarAggregation, int] = {
     BarAggregation.MINUTE: 60_000,
     BarAggregation.HOUR: 3_600_000,
@@ -48,10 +48,31 @@ _BAR_IVL_MS: dict[BarAggregation, int] = {
 }
 
 
+# v3 `interval` accepts named strings — map ivl_ms to the canonical form.
+_V3_INTERVAL_BY_MS: dict[int, str] = {
+    100: "100ms", 500: "500ms",
+    1_000: "1s", 5_000: "5s", 10_000: "10s", 15_000: "15s", 30_000: "30s",
+    60_000: "1m", 300_000: "5m", 600_000: "10m", 900_000: "15m", 1_800_000: "30m",
+    3_600_000: "1h",
+    86_400_000: "1d",
+}
+
+
+def _ivl_ms_to_v3_interval(ivl_ms: int) -> str:
+    s = _V3_INTERVAL_BY_MS.get(ivl_ms)
+    if s is None:
+        raise ValueError(f"Unsupported v3 interval ms={ivl_ms}; supported: {sorted(_V3_INTERVAL_BY_MS)}")
+    return s
+
+
 def _contract_from_instrument_id(instrument_id: InstrumentId) -> dict:
-    """Build the WS contract payload from an OCC-encoded instrument_id."""
+    """Build the v3 WS subscribe contract payload from an OCC-encoded instrument_id.
+
+    Streaming API uses v2-style scaling (strike ×10000 = 1/10¢, expiration int
+    YYYYMMDD, right C/P) — see wire-format note. REST uses different
+    encodings (handled in data client request paths via decode_occ directly).
+    """
     root, expiry, right, strike = decode_occ(instrument_id.symbol.value)
-    # Wire strike scale is 1/10¢ (×10000); OCC carries thousandths so multiply by 10.
     strike_wire = int(Decimal(strike) * Decimal(10000))
     return {
         "security_type": "OPTION",
@@ -164,9 +185,14 @@ class ThetaDataDataClient(LiveMarketDataClient):
 
     async def _request_quote_ticks(self, request: RequestQuoteTicks) -> None:
         await self._ensure_instrument(request.instrument_id)
-        root, _, _, _ = decode_occ(request.instrument_id.symbol.value)
-        rows = await self._http_client.hist_quotes(
-            root, self._date_int(request.start), self._date_int(request.end)
+        root, expiry, right, strike = decode_occ(request.instrument_id.symbol.value)
+        rows = await self._http_client.option_hist_quotes(
+            symbol=root,
+            expiration=expiry,
+            strike=float(strike),
+            right=right,
+            start=self._date_int(request.start),
+            end=self._date_int(request.end),
         )
         price_precision, size_precision = self._precision_for(request.instrument_id)
         ts_init = self._clock.timestamp_ns()
@@ -182,9 +208,14 @@ class ThetaDataDataClient(LiveMarketDataClient):
 
     async def _request_trade_ticks(self, request: RequestTradeTicks) -> None:
         await self._ensure_instrument(request.instrument_id)
-        root, _, _, _ = decode_occ(request.instrument_id.symbol.value)
-        rows = await self._http_client.hist_trades(
-            root, self._date_int(request.start), self._date_int(request.end)
+        root, expiry, right, strike = decode_occ(request.instrument_id.symbol.value)
+        rows = await self._http_client.option_hist_trades(
+            symbol=root,
+            expiration=expiry,
+            strike=float(strike),
+            right=right,
+            start=self._date_int(request.start),
+            end=self._date_int(request.end),
         )
         price_precision, size_precision = self._precision_for(request.instrument_id)
         ts_init = self._clock.timestamp_ns()
@@ -211,10 +242,17 @@ class ThetaDataDataClient(LiveMarketDataClient):
                 f"Unsupported price_type {spec.price_type}; only LAST is supported"
             )
         await self._ensure_instrument(bar_type.instrument_id)
-        root, _, _, _ = decode_occ(bar_type.instrument_id.symbol.value)
+        root, expiry, right, strike = decode_occ(bar_type.instrument_id.symbol.value)
         ivl_ms = _BAR_IVL_MS[spec.aggregation] * spec.step
-        rows = await self._http_client.hist_ohlc(
-            root, self._date_int(request.start), self._date_int(request.end), ivl_ms=ivl_ms
+        interval = _ivl_ms_to_v3_interval(ivl_ms)
+        rows = await self._http_client.option_hist_ohlc(
+            symbol=root,
+            expiration=expiry,
+            strike=float(strike),
+            right=right,
+            start=self._date_int(request.start),
+            end=self._date_int(request.end),
+            interval=interval,
         )
         price_precision, _ = self._precision_for(bar_type.instrument_id)
         ts_init = self._clock.timestamp_ns()

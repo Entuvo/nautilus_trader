@@ -177,14 +177,22 @@ class ThetaDataWsClient:
     # -----------------------------------------------------------------------
 
     def _build_subscribe_payload(self, contract: dict, kind: SubKind, add: bool) -> dict:
+        """Build v3 streaming subscribe/unsubscribe payload.
+
+        v3 docs shape (per Streaming/Getting-Started.html, pending live capture):
+          {"action": "subscribe", "symbols": [SYMBOL], "contract": {...},
+           "stream": "quote"|"trade"}
+        Contract object keeps v2-style keys (root, expiration int, strike ×10000,
+        right C/P) — streaming API didn't migrate to REST's v3 shape.
+        """
         self._next_id += 1
+        symbol = contract.get("root") or contract.get("symbol") or ""
         return {
-            "msg_type": "STREAM",
-            "sec_type": "OPTION",
-            "req_type": kind.value,
-            "add": add,
-            "id": self._next_id,
+            "action": "subscribe" if add else "unsubscribe",
+            "symbols": [symbol] if symbol else [],
             "contract": contract,
+            "stream": kind.value.lower(),  # "quote" / "trade"
+            "id": self._next_id,
         }
 
     async def _send_subscribe(self, instrument_id: InstrumentId, kind: SubKind, contract: dict, add: bool) -> None:

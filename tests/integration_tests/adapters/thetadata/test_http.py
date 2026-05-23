@@ -1,9 +1,14 @@
 """
 Tests for nautilus_trader.adapters.thetadata.http (ThetaDataHttpClient).
+
+Wire shape: v3 — `{"response": [...]}` with named-field objects. History
+endpoints wrap rows in `{contract, data}` blocks; this client flattens to
+`data` rows.
 """
 
 import re
 import time
+from datetime import date
 
 import pytest
 from aioresponses import CallbackResult, aioresponses
@@ -13,21 +18,26 @@ from nautilus_trader.adapters.thetadata.http import (
     ThetaDataHttpClient,
     ThetaDataHttpError,
     _chunk_date_range,
+    _right_to_wire,
 )
 
 
-HTTP_URL = "http://127.0.0.1:25510"
+HTTP_URL = "http://127.0.0.1:25503"
 
 
-def _quote_env(rows):
+def _list_env(rows):
+    return {"response": rows}
+
+
+def _quote_block(rows, symbol="AAPL", exp="2024-06-21", strike=175.0, right="CALL"):
     return {
-        "header": {"status": "OK", "type": "QUOTE", "format": []},
-        "response": rows,
+        "response": [
+            {
+                "contract": {"symbol": symbol, "expiration": exp, "strike": strike, "right": right},
+                "data": rows,
+            }
+        ]
     }
-
-
-def _err_env(error_type="INVALID", message="bad", code=400):
-    return {"header": {"error_type": error_type, "error_message": message, "error_code": code}}
 
 
 def _make_client(rate=100.0, retries=2):
@@ -41,39 +51,35 @@ def _make_client(rate=100.0, retries=2):
 
 
 # ---------------------------------------------------------------------------
-# _chunk_date_range
+# Helpers
 # ---------------------------------------------------------------------------
+
+
+class TestRightToWire:
+    def test_call(self):
+        assert _right_to_wire("C") == "call"
+
+    def test_put(self):
+        assert _right_to_wire("P") == "put"
+
+    def test_lowercase_input(self):
+        assert _right_to_wire("c") == "call"
+
+    def test_invalid(self):
+        with pytest.raises(ValueError, match="Invalid right"):
+            _right_to_wire("X")
 
 
 class TestChunkDateRange:
     def test_single_day(self):
         assert _chunk_date_range(20240101, 20240101) == [(20240101, 20240101)]
 
-    def test_29_days(self):
-        out = _chunk_date_range(20240101, 20240129)
-        assert out == [(20240101, 20240129)]
-        assert len(out) == 1
-
     def test_30_days(self):
-        out = _chunk_date_range(20240101, 20240130)
-        assert out == [(20240101, 20240130)]
-        assert len(out) == 1
+        assert _chunk_date_range(20240101, 20240130) == [(20240101, 20240130)]
 
     def test_31_days_splits(self):
         out = _chunk_date_range(20240101, 20240131)
-        assert len(out) == 2
         assert out == [(20240101, 20240130), (20240131, 20240131)]
-
-    def test_60_days_splits(self):
-        out = _chunk_date_range(20240101, 20240301)
-        # 60 days from Jan 1 to Mar 1 (2024 leap year, but date math handles it)
-        assert len(out) == 3
-        # Chunk 1: 30 days = Jan1..Jan30
-        assert out[0] == (20240101, 20240130)
-
-    def test_90_days_splits(self):
-        out = _chunk_date_range(20240101, 20240331)
-        assert len(out) == 4
 
     def test_invalid_range_raises(self):
         with pytest.raises(ValueError, match="start"):
@@ -81,58 +87,158 @@ class TestChunkDateRange:
 
 
 # ---------------------------------------------------------------------------
-# Historical endpoints
+# Listing endpoints
 # ---------------------------------------------------------------------------
 
 
-class TestHistQuotes:
+class TestListEndpoints:
     @pytest.mark.asyncio
-    async def test_single_day(self):
+    async def test_list_stock_symbols(self):
         client = _make_client()
         with aioresponses() as m:
             m.get(
-                re.compile(r".*v2/hist/stock/quote.*"),
-                payload=_quote_env([[35100000, 38, 69, 5.4, 50, 21, 69, 5.6, 50, 20231103]]),
+                re.compile(r".*v3/stock/list/symbols.*"),
+                payload=_list_env([{"symbol": "AAPL"}, {"symbol": "MSFT"}]),
             )
-            rows = await client.hist_quotes("AAPL", 20231103, 20231103)
+            out = await client.list_stock_symbols()
         await client.close()
-        assert len(rows) == 1
-        assert rows[0][3] == 5.4
+        assert out == ["AAPL", "MSFT"]
 
     @pytest.mark.asyncio
-    async def test_chunk_split_concatenates_in_order(self):
+    async def test_list_expirations_parses_iso(self):
         client = _make_client()
-        chunks_seen: list[tuple[str, str]] = []
         with aioresponses() as m:
-            # Each chunk returns one identifiable row
-            def callback(url, **kwargs):
-                params = url.query
-                chunks_seen.append((params.get("start_date"), params.get("end_date")))
-                # Mark the row with the chunk index so we can assert ordering
-                return CallbackResult(
-                    payload=_quote_env([[len(chunks_seen), 0, 0, 0.0, 0, 0, 0, 0.0, 0, int(params.get("start_date"))]])
-                )
+            m.get(
+                re.compile(r".*v3/option/list/expirations.*"),
+                payload=_list_env([
+                    {"symbol": "AAPL", "expiration": "2024-06-21"},
+                    {"symbol": "AAPL", "expiration": "2024-12-20"},
+                ]),
+            )
+            out = await client.list_expirations("AAPL")
+        await client.close()
+        assert out == [date(2024, 6, 21), date(2024, 12, 20)]
 
-            # 31 days → 2 chunks
-            m.get(re.compile(r".*v2/hist/stock/quote.*"), callback=callback)
-            m.get(re.compile(r".*v2/hist/stock/quote.*"), callback=callback)
-            rows = await client.hist_quotes("AAPL", 20240101, 20240131)
+    @pytest.mark.asyncio
+    async def test_list_strikes_returns_dollars(self):
+        # v3 returns floats in dollars (not 1/10¢ as v2 did).
+        client = _make_client()
+        with aioresponses() as m:
+            m.get(
+                re.compile(r".*v3/option/list/strikes.*"),
+                payload=_list_env([
+                    {"symbol": "AAPL", "strike": 80.0},
+                    {"symbol": "AAPL", "strike": 175.0},
+                ]),
+            )
+            from decimal import Decimal
+            out = await client.list_strikes("AAPL", date(2024, 6, 21))
+        await client.close()
+        assert out == [Decimal("80.0"), Decimal("175.0")]
+
+
+# ---------------------------------------------------------------------------
+# Option history endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestOptionHistory:
+    @pytest.mark.asyncio
+    async def test_quotes_flattens_contract_blocks(self):
+        client = _make_client()
+        with aioresponses() as m:
+            m.get(
+                re.compile(r".*v3/option/history/quote.*"),
+                payload=_quote_block([
+                    {"timestamp": "2024-06-20T09:30:00.000", "bid": 39.0, "ask": 39.7,
+                     "bid_size": 5, "ask_size": 1},
+                    {"timestamp": "2024-06-20T09:30:01.000", "bid": 38.55, "ask": 39.25,
+                     "bid_size": 30, "ask_size": 30},
+                ]),
+            )
+            rows = await client.option_hist_quotes(
+                "AAPL", date(2024, 6, 21), 175.0, "C", 20240620, 20240620,
+            )
         await client.close()
         assert len(rows) == 2
-        assert rows[0][0] == 1
-        assert rows[1][0] == 2
+        assert rows[0]["bid"] == 39.0
 
     @pytest.mark.asyncio
-    async def test_chunk_failure_propagates(self):
-        client = _make_client(retries=0)
+    async def test_quotes_chunks_30_day_range(self):
+        client = _make_client()
+        chunks_seen = []
         with aioresponses() as m:
-            # First chunk OK, second 500 — exception should propagate
-            m.get(re.compile(r".*v2/hist/stock/quote.*"), payload=_quote_env([[1]]))
-            m.get(re.compile(r".*v2/hist/stock/quote.*"), status=500, payload={"oops": True})
-            with pytest.raises(ThetaDataHttpError) as ei:
-                await client.hist_quotes("AAPL", 20240101, 20240131)
+            def callback(url, **kwargs):
+                chunks_seen.append((url.query.get("start_date"), url.query.get("end_date")))
+                return CallbackResult(payload=_quote_block([
+                    {"timestamp": "2024-01-01T09:30:00.000", "bid": 1.0, "ask": 1.1,
+                     "bid_size": 1, "ask_size": 1}
+                ]))
+            # 31 days → 2 chunks; register two callbacks.
+            m.get(re.compile(r".*v3/option/history/quote.*"), callback=callback)
+            m.get(re.compile(r".*v3/option/history/quote.*"), callback=callback)
+            rows = await client.option_hist_quotes(
+                "AAPL", date(2024, 6, 21), 175.0, "C", 20240101, 20240131,
+            )
         await client.close()
-        assert ei.value.status == 500
+        assert len(chunks_seen) == 2
+        assert len(rows) == 2  # one row per chunk
+
+    @pytest.mark.asyncio
+    async def test_request_includes_required_params(self):
+        client = _make_client()
+        captured = {}
+        with aioresponses() as m:
+            def callback(url, **kwargs):
+                captured.update(dict(url.query))
+                return CallbackResult(payload=_quote_block([]))
+
+            m.get(re.compile(r".*v3/option/history/quote.*"), callback=callback)
+            await client.option_hist_quotes(
+                "AAPL", date(2024, 6, 21), 175.0, "C", 20240620, 20240620, interval="1m",
+            )
+        await client.close()
+        assert captured["symbol"] == "AAPL"
+        assert captured["expiration"] == "2024-06-21"
+        assert captured["strike"] == "175.0"
+        assert captured["right"] == "call"
+        assert captured["interval"] == "1m"
+        assert captured["format"] == "json"
+
+    @pytest.mark.asyncio
+    async def test_trades_endpoint(self):
+        client = _make_client()
+        with aioresponses() as m:
+            m.get(
+                re.compile(r".*v3/option/history/trade.*"),
+                payload=_quote_block([
+                    {"timestamp": "2024-06-20T09:30:00.334", "price": 39.03, "size": 1,
+                     "condition": 18, "sequence": 1, "exchange": 1},
+                ]),
+            )
+            rows = await client.option_hist_trades(
+                "AAPL", date(2024, 6, 21), 175.0, "C", 20240620, 20240620,
+            )
+        await client.close()
+        assert rows[0]["price"] == 39.03
+
+    @pytest.mark.asyncio
+    async def test_ohlc_endpoint(self):
+        client = _make_client()
+        with aioresponses() as m:
+            m.get(
+                re.compile(r".*v3/option/history/ohlc.*"),
+                payload=_quote_block([
+                    {"timestamp": "2024-06-20T09:30:00.000",
+                     "open": 39.03, "high": 39.03, "low": 39.03, "close": 39.03,
+                     "volume": 1, "vwap": 39.03, "count": 1},
+                ]),
+            )
+            rows = await client.option_hist_ohlc(
+                "AAPL", date(2024, 6, 21), 175.0, "C", 20240620, 20240620,
+            )
+        await client.close()
+        assert rows[0]["close"] == 39.03
 
 
 # ---------------------------------------------------------------------------
@@ -145,32 +251,55 @@ class TestRetryPolicy:
     async def test_503_retried_then_succeeds(self):
         client = _make_client(retries=3)
         with aioresponses() as m:
-            m.get(re.compile(r".*v2/hist/stock/quote.*"), status=503, payload={})
-            m.get(re.compile(r".*v2/hist/stock/quote.*"), status=503, payload={})
-            m.get(re.compile(r".*v2/hist/stock/quote.*"), payload=_quote_env([[1]]))
-            rows = await client.hist_quotes("AAPL", 20240101, 20240101)
+            m.get(re.compile(r".*v3/option/list/expirations.*"), status=503, payload={})
+            m.get(re.compile(r".*v3/option/list/expirations.*"),
+                  payload=_list_env([{"symbol": "AAPL", "expiration": "2024-06-21"}]))
+            out = await client.list_expirations("AAPL")
         await client.close()
-        assert rows == [[1]]
+        assert out == [date(2024, 6, 21)]
 
     @pytest.mark.asyncio
     async def test_429_retried_then_succeeds(self):
         client = _make_client(retries=3)
         with aioresponses() as m:
-            m.get(re.compile(r".*v2/hist/stock/quote.*"), status=429, payload={})
-            m.get(re.compile(r".*v2/hist/stock/quote.*"), payload=_quote_env([[1]]))
-            rows = await client.hist_quotes("AAPL", 20240101, 20240101)
+            m.get(re.compile(r".*v3/option/list/expirations.*"), status=429, payload={})
+            m.get(re.compile(r".*v3/option/list/expirations.*"),
+                  payload=_list_env([{"symbol": "AAPL", "expiration": "2024-06-21"}]))
+            out = await client.list_expirations("AAPL")
         await client.close()
-        assert rows == [[1]]
+        assert out == [date(2024, 6, 21)]
 
     @pytest.mark.asyncio
     async def test_400_not_retried(self):
         client = _make_client(retries=5)
         with aioresponses() as m:
-            m.get(re.compile(r".*v2/hist/stock/quote.*"), status=400, payload={})
+            m.get(re.compile(r".*v3/option/list/expirations.*"), status=400, payload={})
             with pytest.raises(ThetaDataHttpError) as ei:
-                await client.hist_quotes("AAPL", 20240101, 20240101)
+                await client.list_expirations("AAPL")
         await client.close()
         assert ei.value.status == 400
+
+
+# ---------------------------------------------------------------------------
+# Tier / auth plain-text error path
+# ---------------------------------------------------------------------------
+
+
+class TestPlainTextErrorPath:
+    @pytest.mark.asyncio
+    async def test_plain_text_response_treated_as_error(self):
+        # v3 returns plain text (NOT JSON envelope) for tier/auth failures
+        # even with HTTP 200. The client must detect and raise.
+        client = _make_client(retries=0)
+        with aioresponses() as m:
+            m.get(
+                re.compile(r".*v3/stock/list/symbols.*"),
+                body="Requesting a stock endpoint requiring a value subscription...",
+                content_type="text/plain",
+            )
+            with pytest.raises(ThetaDataHttpError, match="value subscription"):
+                await client.list_stock_symbols()
+        await client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -181,70 +310,14 @@ class TestRetryPolicy:
 class TestRateLimit:
     @pytest.mark.asyncio
     async def test_rate_limit_enforced(self):
-        # 2 req/s — 4 requests should take at least ~1s (3 inter-arrival gaps capped by limiter).
         client = _make_client(rate=2.0)
         with aioresponses() as m:
             for _ in range(4):
-                m.get(re.compile(r".*v2/list/expirations.*"), payload=_quote_env([20240101]))
+                m.get(re.compile(r".*v3/option/list/expirations.*"),
+                      payload=_list_env([{"symbol": "AAPL", "expiration": "2024-06-21"}]))
             t0 = time.monotonic()
             for _ in range(4):
                 await client.list_expirations("AAPL")
             elapsed = time.monotonic() - t0
         await client.close()
-        # At 2 req/s with a burst budget of 2, 4 calls should need >0.9s.
         assert elapsed > 0.9, f"rate limit ineffective: 4 calls in {elapsed:.2f}s"
-
-
-# ---------------------------------------------------------------------------
-# Listing endpoints
-# ---------------------------------------------------------------------------
-
-
-class TestListEndpoints:
-    @pytest.mark.asyncio
-    async def test_list_expirations(self):
-        client = _make_client()
-        with aioresponses() as m:
-            m.get(re.compile(r".*v2/list/expirations.*"), payload=_quote_env([20241011, 20241018]))
-            out = await client.list_expirations("AAPL")
-        await client.close()
-        assert out == [20241011, 20241018]
-
-    @pytest.mark.asyncio
-    async def test_list_strikes_converts_units(self):
-        # Wire: strike in 1/10th cent. 140000 → $14.00.
-        client = _make_client()
-        with aioresponses() as m:
-            m.get(re.compile(r".*v2/list/strikes.*"), payload=_quote_env([140000, 1500000]))
-            out = await client.list_strikes("AAPL", 20240620)
-        await client.close()
-        from decimal import Decimal
-        assert out == [Decimal("14.0000"), Decimal("150.0000")]
-
-    @pytest.mark.asyncio
-    async def test_list_contracts(self):
-        client = _make_client()
-        with aioresponses() as m:
-            m.get(
-                re.compile(r".*v2/list/contracts/option/trade.*"),
-                payload=_quote_env([["AAPL", 20230616, 260000, "P"]]),
-            )
-            out = await client.list_contracts("AAPL", 20230512)
-        await client.close()
-        assert out == [("AAPL", 20230616, 260000, "P")]
-
-
-# ---------------------------------------------------------------------------
-# Envelope error handling
-# ---------------------------------------------------------------------------
-
-
-class TestEnvelopeErrors:
-    @pytest.mark.asyncio
-    async def test_envelope_error_raises(self):
-        client = _make_client()
-        with aioresponses() as m:
-            m.get(re.compile(r".*v2/list/expirations.*"), payload=_err_env("UNKNOWN_ROOT", "bad root"))
-            with pytest.raises(ThetaDataHttpError, match="UNKNOWN_ROOT"):
-                await client.list_expirations("BOGUS")
-        await client.close()

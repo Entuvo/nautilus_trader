@@ -27,9 +27,9 @@ _INSTRUMENT_ID = InstrumentId.from_str("AAPL231110P00360000.OPT-THETADATA")
 _CONTRACT = {
     "security_type": "OPTION",
     "root": "AAPL",
-    "expiration": 20231110,
-    "strike": 360000,
-    "right": "P",
+    "expiration": 20240621,
+    "strike": 1750000,  # $175.00 in 1/10¢ (streaming uses v2-style scaling)
+    "right": "C",
 }
 
 
@@ -133,10 +133,10 @@ class TestSubscribePayloads:
         await client.subscribe_quotes(_INSTRUMENT_ID, _CONTRACT)
         assert len(sock.sent) == 1
         payload = json.loads(sock.sent[0])
-        assert payload["msg_type"] == "STREAM"
-        assert payload["sec_type"] == "OPTION"
-        assert payload["req_type"] == "QUOTE"
-        assert payload["add"] is True
+        # v3 streaming shape per docs/architecture/notes/thetadata-wire-format.md
+        assert payload["action"] == "subscribe"
+        assert payload["stream"] == "quote"
+        assert payload["symbols"] == ["AAPL"]
         assert payload["contract"] == _CONTRACT
         assert payload["id"] == 1
         assert client._subs[(_INSTRUMENT_ID, SubKind.QUOTE)] == SubState.STREAMING
@@ -161,7 +161,7 @@ class TestSubscribePayloads:
         await client.subscribe_quotes(_INSTRUMENT_ID, _CONTRACT)
         await client.unsubscribe_quotes(_INSTRUMENT_ID)
         payloads = [json.loads(p) for p in sock.sent]
-        assert payloads[-1]["add"] is False
+        assert payloads[-1]["action"] == "unsubscribe"
         assert client._subs[(_INSTRUMENT_ID, SubKind.QUOTE)] == SubState.IDLE
         await client.close()
 
@@ -184,7 +184,8 @@ class TestFrameDispatch:
         sock.push({
             "header": {"status": "CONNECTED", "type": "QUOTE"},
             "contract": _CONTRACT,
-            "quote": {"ms_of_day": 49531278, "bid_size": 42, "bid": 1.25, "ask_size": 30, "ask": 1.35},
+            "quote": {"timestamp": "2024-06-20T09:30:01.000",
+                      "bid_size": 42, "bid": 1.25, "ask_size": 30, "ask": 1.35},
         })
         # Yield to processor
         await asyncio.sleep(0.05)
@@ -204,7 +205,8 @@ class TestFrameDispatch:
         sock.push({
             "header": {"status": "CONNECTED", "type": "TRADE"},
             "contract": _CONTRACT,
-            "trade": {"ms_of_day": 49531278, "sequence": -1, "size": 5, "condition": 145, "price": 1.06, "exchange": 65, "date": 20231103},
+            "trade": {"timestamp": "2024-06-20T09:30:00.334", "sequence": -1,
+                      "size": 5, "condition": 145, "price": 1.06, "exchange": 65},
         })
         await asyncio.sleep(0.05)
         assert len(ticks) == 1
@@ -238,7 +240,8 @@ class TestFrameDispatch:
         sock.push({
             "header": {"type": "QUOTE"},
             "contract": _CONTRACT,
-            "quote": {"ms_of_day": 49531278, "bid_size": 42, "ask_size": 30, "ask": 1.35},
+            "quote": {"timestamp": "2024-06-20T09:30:01.000",
+                      "bid_size": 42, "ask_size": 30, "ask": 1.35},
         })
         await asyncio.sleep(0.05)
         assert client._decode_failures >= 1
@@ -279,7 +282,7 @@ class TestReconnect:
         # The new socket should have received the replayed subscribe.
         assert len(sock2.sent) == 1
         payload = json.loads(sock2.sent[0])
-        assert payload["add"] is True
+        assert payload["action"] == "subscribe"
         assert payload["contract"] == _CONTRACT
         assert client._subs[(_INSTRUMENT_ID, SubKind.QUOTE)] == SubState.STREAMING
         # Precision map survived reconnect.

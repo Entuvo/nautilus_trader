@@ -6,7 +6,7 @@ from nautilus_trader.live.config import LiveDataClientConfig
 
 
 class ThetaDataDataClientConfig(LiveDataClientConfig, frozen=True, kw_only=True):
-    http_url: str = msgspec.field(default="http://127.0.0.1:25510")
+    http_url: str = msgspec.field(default="http://127.0.0.1:25503")
     ws_url: str = msgspec.field(default="ws://127.0.0.1:25520/v1/events")
     tier: str = msgspec.field(default="value")
     http_timeout_secs: int = msgspec.field(default=60)
